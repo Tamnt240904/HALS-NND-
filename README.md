@@ -5,7 +5,7 @@
 git clone https://github.com/Tamnt240904/HALS-NND-.git
 cd HALS-NND-
 mkdir weights
-gdown --folder https://drive.google.com/drive/folders/1-zOgSpDyLXvHvhigict-lbbkA5XCwDIi -O weights
+gdown 1gxuNfXk4kP_gLd0s53y5XluRR8A6kERT -O weights/
 ```
 
 ## Bước 2:
