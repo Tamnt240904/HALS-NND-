@@ -8,15 +8,18 @@ from torch.utils.data import DataLoader, TensorDataset
 from typing import List, Tuple, Optional
 from tqdm import tqdm
 
-
+# Params to be sparse but strange pattern?
+# lamD: float = 1e-2,
+# lamW: float = 5e-2,
+# gamma: float = 5e-2,
 def hals_nnd_correct(
     X_list: List[torch.Tensor],
     m: int,
     nsteps: int = 200,
-    lamD: float = 1e-3,
-    lamW: float = 1e-3,
-    gamma: float = 1e-2,
-    eta: float = 0.1,
+    lamD: float = 5e-4,
+    lamW: float = 5e-2,
+    gamma: float = 5e-4,
+    eta: float = 0.01,
     seed: int = 0,
     batch_size: int = 1000,
     device: Optional[torch.device] = None
@@ -62,7 +65,7 @@ def hals_nnd_correct(
                  torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     torch.manual_seed(seed)
-    
+    print("HALS v2.2")
     n = len(X_list)
     d = X_list[0].shape[0]
     
@@ -99,7 +102,13 @@ def hals_nnd_correct(
         indexing='ij'
     )
     R_coords = torch.stack([ii, jj], dim=-1)  # [d, d, 2]
-    
+    def enforce_W_sparsity(W, density):
+        flat = W.view(-1)
+        k = int(density * flat.numel())
+        if k < 1:
+            return torch.zeros_like(W)
+        thresh = torch.topk(flat, k).values[-1]
+        return torch.where(W >= thresh, W, torch.zeros_like(W))
     # ==================== Loss computation ====================
     def compute_loss_components(X_batch: torch.Tensor, W_batch: torch.Tensor) -> Tuple[float, float, float]:
         """Compute loss components for a batch
@@ -151,7 +160,7 @@ def hals_nnd_correct(
     best_W = W.clone()
     
     print(f"{'='*70}")
-    print(f"Starting HALS-NND optimization:")
+    print(f"Starting HALS-NND optimization: v0")
     print(f"  Data: {n} samples of size {d}x{d}")
     print(f"  Dictionary: {m} atoms")
     print(f"  Epochs: {nsteps}, Batch size: {batch_size}")
@@ -167,79 +176,84 @@ def hals_nnd_correct(
         epoch_reg_losses = []
         epoch_total_losses = []
         
+        # ==============================
+        # (A) UPDATE W for ALL batches
+        # ==============================
+                    # Precompute G and B for this batch
+        D_flat = D.view(m, -1)
+        G = D_flat @ D_flat.t()            # [m, m]
+        diagG = torch.diagonal(G)
+        denom = diagG + lamW    
         for X_batch, indices_batch in loader:
             curr_batch_size = X_batch.shape[0]
+
+           # [m]
+
+            X_flat = X_batch.view(curr_batch_size, -1)
+            B = X_flat @ D_flat.t()            # [batch, m]
             
-            # ==================== (A) UPDATE W ====================
-            # Precompute Gram matrix and projections
-            D_flat = D.view(m, -1)  # [m, d²]
-            G = torch.mm(D_flat, D_flat.t())  # [m, m]: G[k,l] = <D_k, D_l>
-            
-            X_flat = X_batch.view(curr_batch_size, -1)  # [batch, d²]
-            B = torch.mm(X_flat, D_flat.t())  # [batch, m]: B[i,k] = <A_i, D_k>
-            
-            # Extract relevant rows of W
             W_batch = W[indices_batch]
-            
-            # Block Gauss-Seidel update (sequential over samples, parallel over atoms)
-            diag_G = torch.diagonal(G)  # [m]
-            denom = diag_G + lamW  # [m]
-            
-            for i in range(curr_batch_size):
-                # Current reconstruction error contributions
-                WG_row = W_batch[i:i+1] @ G  # [1, m]
-                
-                # Numerator: <X_i, D_k> - sum_{l≠k} w_il <D_l, D_k>
-                numer = B[i:i+1] - WG_row + W_batch[i:i+1] * diag_G
-                
-                # Update with non-negativity
-                W_batch[i:i+1] = torch.clamp(numer / denom, min=0.0)
-            
-            # Write back to global W
+
+            # TRUE HALS Gauss–Seidel update
+            for k in range(m):
+                # Compute reconstruction of atom k using other atoms
+                residual_k = B[:, k] - (W_batch @ G[:, k] - W_batch[:, k] * G[k, k])
+
+                W_batch[:, k] = torch.clamp(residual_k / denom[k], min=0.0)
+
+            #w_thresh = 1e-3
+            #W_batch[W_batch < w_thresh] = 0.0
+            W_batch = enforce_W_sparsity(W_batch, density=0.08)
             W[indices_batch] = W_batch
+            #W[indices_batch] = W_batch
             
-            # ==================== (B) UPDATE D ====================
-            # Compute residuals for full dataset (needed for gradient)
-            recon = torch.einsum('ik,kde->ide', W, D)
-            residuals = X_stack - recon  # [n, d, d]
-            
-            # Gradient: ∇_D_k = -sum_i w_ik R_i
-            grad_D = -torch.einsum('ik,ide->kde', W, residuals)  # [m, d, d]
-            
-            # Gradient descent step
-            Y = D - eta * grad_D
-            
-            # Spatially-varying soft-thresholding
-            atom_abs = torch.abs(D)
-            weight_sum = atom_abs.sum(dim=(1, 2), keepdim=True).clamp(min=1e-8)
-            
-            # Center of mass
-            mu = (atom_abs.unsqueeze(-1) * R_coords).sum(dim=(1, 2)) / weight_sum.squeeze(-1)  # [m, 2]
-            
-            # Distance map
-            dist2 = ((R_coords.unsqueeze(0) - mu.view(m, 1, 1, 2)) ** 2).sum(dim=-1)  # [m, d, d]
-            
-            # Threshold varies with distance from center
-            threshold = eta * (lamD + gamma * dist2)
-            
-            # Soft-thresholding
-            Z = torch.sign(Y) * torch.clamp(torch.abs(Y) - threshold, min=0.0)
-            
-            # Non-negativity constraint
-            Z = torch.clamp(Z, min=0.0)
-            
-            # Project to unit Frobenius ball
-            Z_flat = Z.view(m, -1)
-            norms = torch.linalg.norm(Z_flat, dim=1, keepdim=True).clamp(min=1.0)
-            D = (Z_flat / norms).view(m, d, d)
-            
-            # ==================== Track loss ====================
+            # (Optional) track batch loss for W updates only
             recon_loss, reg_loss, total_loss = compute_loss_components(X_batch, W_batch)
             epoch_recon_losses.append(recon_loss)
             epoch_reg_losses.append(reg_loss)
             epoch_total_losses.append(total_loss)
-        
-        # Epoch statistics (average over all batches)
+
+        # ==============================
+        # (B) UPDATE D once per epoch
+        # ==============================
+        # FULL reconstruction residuals, using *all* updated W
+        recon_full = torch.einsum('ik,kde->ide', W, D)
+        residuals = X_stack - recon_full
+
+        # FULL gradient over dataset
+        grad_D = -torch.einsum('ik,ide->kde', W, residuals) / n
+
+        # Gradient descent step
+        Y = D - eta * grad_D
+
+        # Spatial soft threshold
+        #atom_abs = torch.abs(D)
+        atom_abs = torch.abs(Y)    # better approximation for prox step
+
+        weight_sum = atom_abs.sum(dim=(1, 2), keepdim=True).clamp(min=1e-8)
+        mu = (atom_abs.unsqueeze(-1) * R_coords).sum(dim=(1, 2)) / weight_sum.squeeze(-1)
+        dist2 = ((R_coords.unsqueeze(0) - mu.view(m, 1, 1, 2)) ** 2).sum(dim=-1)
+
+        threshold = eta * (lamD + gamma * dist2)
+        Z = torch.sign(Y) * torch.clamp(torch.abs(Y) - threshold, min=0.0)
+
+        # Non-negativity projection
+        Z = torch.clamp(Z, min=0.0)
+
+        # Frobenius norm projection
+        Z_flat = Z.view(m, -1)
+        dead = (Z_flat.abs().sum(dim=1) < 1e-6)
+        if dead.any():
+            Z_flat[dead] = 0.1 * torch.randn_like(Z_flat[dead])
+            W[:, dead] = 0.1 * torch.rand(W.shape[0], dead.sum(), device=device)
+
+        norms = torch.linalg.norm(Z_flat, dim=1, keepdim=True)
+        norms = torch.clamp(norms, min=1e-8)   # avoid div0 but don’t force nonzero norm
+        D = (Z_flat / norms).view(m, d, d)
+
+        # ==============================
+        # (C) Compute epoch loss
+        # ==============================
         avg_recon_loss = sum(epoch_recon_losses) / len(epoch_recon_losses)
         avg_reg_loss = sum(epoch_reg_losses) / len(epoch_reg_losses)
         avg_total_loss = sum(epoch_total_losses) / len(epoch_total_losses)
@@ -247,8 +261,7 @@ def hals_nnd_correct(
         loss_history['reconstruction'].append(avg_recon_loss)
         loss_history['regularization'].append(avg_reg_loss)
         loss_history['total'].append(avg_total_loss)
-        
-        # Track best solution
+
         if avg_total_loss < best_loss:
             best_loss = avg_total_loss
             best_D = D.clone()
@@ -256,9 +269,9 @@ def hals_nnd_correct(
             status = "✓ new best"
         else:
             status = "→"
-        
-        # Update progress
+
         delta = avg_total_loss - loss_history['total'][-2] if len(loss_history['total']) > 1 else 0
+
         pbar.set_postfix({
             'loss': f'{avg_total_loss:.6f}',
             'recon': f'{avg_recon_loss:.6f}',
@@ -266,7 +279,11 @@ def hals_nnd_correct(
             'Δ': f'{delta:.2e}',
             'status': status
         })
-    
+        if epoch % 1 == 0:
+            with torch.no_grad():
+                print(f"[epoch {epoch}] ||W||_F={W.norm().item():.3f}, "
+                    f"||grad_D||_F={grad_D.norm().item():.3f}")
+        
     # ==================== Final report ====================
     print(f"\n{'='*70}")
     print(f"Optimization completed:")
@@ -274,9 +291,8 @@ def hals_nnd_correct(
     print(f"  Final recon loss:  {avg_recon_loss:.6f}")
     print(f"  Final reg loss:    {avg_reg_loss:.6f}")
     print(f"  Best total loss:   {best_loss:.6f}")
-    print(f"  W sparsity:        {(best_W > 1e-6).float().mean().item()*100:.1f}% non-zero")
-    print(f"  D sparsity:        {(best_D > 1e-6).float().mean().item()*100:.1f}% non-zero")
+    print(f"  W sparsity:        {(best_W > 1e-4).float().mean().item()*100:.1f}% non-zero")
+    print(f"  D sparsity:        {(best_D > 1e-3).float().mean().item()*100:.1f}% non-zero")
     print(f"{'='*70}")
     
     return best_D, best_W, loss_history
-

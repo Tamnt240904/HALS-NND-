@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from typing import List, Tuple, Optional
 import os
-
+from .utils import *
 # Import GradCAM from the same package
 from .gradcam import GradCAM
 
@@ -312,3 +312,133 @@ class TopKActivationAnalyzer:
             self.visualize_channel_decomposition(results, channel_rank=i, save_path=save_path)
 
    
+    def analyze_image(self, image: torch.Tensor, k: int = 5, 
+                     lam: float = 1e-2, verbose: bool = False) -> dict:
+        """
+        Complete analysis: get all channel weights and sparse codes.
+        Returns comprehensive analysis results.
+        """
+        image = image.to(self.device)
+        
+        # Get all channel weights via GradCAM
+        weights, _, pred_class = self.gradcam.forward(image)
+        
+        # Get all activations [C, H, W]
+        activations = self.gradcam.activations.squeeze().cpu()
+        n_channels = activations.shape[0]
+        
+        # Compute sparse codes for ALL channels
+        sparse_codes = []
+        for c in range(n_channels):
+            A_np = activations[c].numpy()
+            w = l1_code(A_np, self.dictionary, lam=lam, iters=100, nonneg=True)
+            sparse_codes.append(w)
+        
+        sparse_codes = np.array(sparse_codes)  # (n_channels, m_atoms)
+        
+        # Get top-k channels
+        top_k_indices = torch.argsort(weights, descending=True)[:k].cpu().numpy()
+        
+        results = {
+            'weights': weights.cpu().numpy(),           # (n_channels,)
+            'sparse_codes': sparse_codes,               # (n_channels, m_atoms)
+            'top_k_indices': top_k_indices.tolist(),   # List of top k indices
+            'pred_class': pred_class
+        }
+        
+        if verbose:
+            print(f"Analyzed {n_channels} channels")
+            print(f"Top-{k} channel indices: {results['top_k_indices']}")
+        
+        return results
+
+
+def run_complete_analysis(model, target_layer, D,
+                         subset_paths: List[Tuple[str, int]], 
+                         k: int = 5, lam: float = 1e-2):
+    """
+    Run complete intra-class vs inter-class similarity analysis.
+    
+    Args:
+        weights_path: Path to model weights
+        dictionary_path: Path to dictionary atoms
+        subset_paths: List of (image_path, label) tuples
+        k: Number of top channels to analyze
+        lam: L1 regularization parameter
+    """
+    # Setup
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # Load model and dictionary
+    print("\nLoading model and dictionary...")
+    # model = load_pretrained_alexnet(weights_path, num_classes=10, device=device)
+    # target_layer = model.features[2]  # First pooling layer
+    # D = torch.load(dictionary_path)
+    
+    # Create analyzer
+    analyzer = TopKActivationAnalyzer(model, target_layer, D, device)
+    
+    # Analyze all images
+    print(f"\nAnalyzing {len(subset_paths)} images...")
+    results = []
+    
+    for idx, (path, label) in enumerate(subset_paths):
+        if idx % 10 == 0:
+            print(f"Processing image {idx+1}/{len(subset_paths)}...")
+        
+        img_tensor = load_image(path)
+        analysis = analyzer.analyze_image(img_tensor, k=k, lam=lam)
+        
+        results.append({
+            'path': path,
+            'label': label,
+            'analysis': analysis
+        })
+    
+    # Compute similarities
+    print("\nComputing similarities...")
+    intra = {'weight': [], 'sparse': [], 'topk': []}
+    inter = {'weight': [], 'sparse': [], 'topk': []}
+    
+    for i in range(len(results)):
+        for j in range(i+1, len(results)):
+            r1, r2 = results[i], results[j]
+            sim = compare_images(r1['analysis'], r2['analysis'], k=k)
+            
+            if r1['label'] == r2['label']:
+                for metric in sim:
+                    intra[metric].append(sim[metric])
+            else:
+                for metric in sim:
+                    inter[metric].append(sim[metric])
+    
+    # Print summary
+    print("\n" + "="*70)
+    print("INTRA-CLASS SIMILARITY (same class)")
+    print("="*70)
+    for metric, values in intra.items():
+        print(f"{metric:10s}: mean={np.mean(values):.4f}, std={np.std(values):.4f}")
+    
+    print("\n" + "="*70)
+    print("INTER-CLASS SIMILARITY (different classes)")
+    print("="*70)
+    for metric, values in inter.items():
+        print(f"{metric:10s}: mean={np.mean(values):.4f}, std={np.std(values):.4f}")
+    
+    print("\n" + "="*70)
+    print("DIFFERENCE (Intra - Inter)")
+    print("="*70)
+    for metric in intra.keys():
+        diff = np.mean(intra[metric]) - np.mean(inter[metric])
+        print(f"{metric:10s}: {diff:+.4f}")
+    
+    # Visualize
+    visualize_similarity_distributions(intra, inter)
+    
+    return {
+        'intra': intra,
+        'inter': inter,
+        'results': results
+    }
+
