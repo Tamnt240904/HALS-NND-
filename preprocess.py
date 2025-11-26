@@ -4,11 +4,14 @@ Script tiền xử lý dataset Imagenette
 - Tải dataset từ Kaggle
 - Giải nén
 - Gộp train/val và đổi tên thư mục theo class name
+- Tạo subset dữ liệu (10 ảnh/class)
+- Đổi tên ảnh trong subset thành 1.jpeg, 2.jpeg...
 """
 
 import os
 import shutil
 import subprocess
+import random
 import kagglehub
 
 
@@ -31,6 +34,73 @@ def count_images(root):
     return count
 
 
+def create_subset(src_root, dst_root, num_samples=10):
+    """
+    Tạo folder data/subset chứa một lượng nhỏ ảnh ngẫu nhiên từ dataset gốc
+    """
+    print(f"\n=== Bước 8: Tạo subset ({num_samples} ảnh/class) ===")
+    
+    if not os.path.exists(dst_root):
+        os.makedirs(dst_root)
+
+    print(f"Source: {src_root}")
+    print(f"Destination: {dst_root}")
+
+    for class_folder in os.listdir(src_root):
+        src_class_path = os.path.join(src_root, class_folder)
+        
+        if os.path.isdir(src_class_path):
+            dst_class_path = os.path.join(dst_root, class_folder)
+            os.makedirs(dst_class_path, exist_ok=True)
+            
+            files = [f for f in os.listdir(src_class_path) if os.path.isfile(os.path.join(src_class_path, f))]
+            selected_files = random.sample(files, min(len(files), num_samples))
+            
+            for file_name in selected_files:
+                shutil.copy2(os.path.join(src_class_path, file_name), 
+                             os.path.join(dst_class_path, file_name))
+            
+            print(f"  - Đã copy {len(selected_files)} ảnh cho class: {class_folder}")
+
+    print(f"-> Đã tạo xong data/subset.")
+
+
+def rename_subset_images(root_dir):
+    """
+    Đổi tên các file trong subset thành 1.jpeg, 2.jpeg...
+    """
+    print("\n=== Bước 9: Đổi tên ảnh trong subset (1.jpeg, 2.jpeg...) ===")
+    
+    # Duyệt qua từng folder con (từng class)
+    for class_folder in os.listdir(root_dir):
+        class_path = os.path.join(root_dir, class_folder)
+        
+        # Kiểm tra xem có phải là folder không
+        if os.path.isdir(class_path):
+            # Lấy danh sách tất cả các file trong folder đó
+            files = [f for f in os.listdir(class_path) if os.path.isfile(os.path.join(class_path, f))]
+            
+            # Sắp xếp danh sách file
+            files.sort()
+            
+            print(f"  - Đang xử lý: {class_folder} ({len(files)} ảnh)")
+            
+            for idx, filename in enumerate(files):
+                # Tạo tên mới: 1.jpeg, 2.jpeg, ...
+                new_name = f"{idx + 1}.jpeg"
+                
+                old_file_path = os.path.join(class_path, filename)
+                new_file_path = os.path.join(class_path, new_name)
+                
+                # Thực hiện đổi tên
+                if old_file_path != new_file_path:
+                    # Trong trường hợp file đích đã tồn tại (ví dụ chạy lại script), force overwrite hoặc bỏ qua tùy logic
+                    # Ở đây dùng os.rename cơ bản
+                    os.rename(old_file_path, new_file_path)
+
+    print("-> Hoàn tất đổi tên.")
+
+
 def main():
     # 1. Tạo thư mục data
     print("=== Bước 1: Tạo thư mục data ===")
@@ -41,7 +111,8 @@ def main():
     path = kagglehub.dataset_download("jhoward/imagenette-160-px")
     print(f"Path to dataset files: {path}")
     
-    # Di chuyển dataset
+    if os.path.exists("./data/imagenette"):
+        shutil.rmtree("./data/imagenette")
     run_command(f"mv {path} ./data/imagenette")
 
     # 3. Giải nén
@@ -56,7 +127,6 @@ def main():
     # 5. Gộp và đổi tên thư mục
     print("\n=== Bước 5: Gộp train/val và đổi tên ===")
     
-    # Ánh xạ từ mã ID sang tên lớp
     class_map = {
         'n01440764': 'tench',
         'n02102040': 'English_springer',
@@ -70,53 +140,56 @@ def main():
         'n03888257': 'parachute'
     }
 
-    # Định nghĩa các đường dẫn
     base_dir = 'data/imagenette'
     train_dir = os.path.join(base_dir, 'train')
     val_dir = os.path.join(base_dir, 'val')
 
     print(f"Bắt đầu gộp và đổi tên tại: {base_dir}")
 
-    # Lặp qua từng lớp để gộp và đổi tên
     for class_code, class_name in class_map.items():
-        
-        # Đường dẫn thư mục nguồn (train và val)
         source_train = os.path.join(train_dir, class_code)
         source_val = os.path.join(val_dir, class_code)
-        
-        # Đường dẫn thư mục đích (đã gộp)
         target_dir = os.path.join(base_dir, class_name)
         
-        # Tạo thư mục đích nếu nó chưa tồn tại
         os.makedirs(target_dir, exist_ok=True)
         
-        # Copy từ 'train'
         if os.path.isdir(source_train):
             for filename in os.listdir(source_train):
-                source_file = os.path.join(source_train, filename)
-                target_file = os.path.join(target_dir, filename)
-                shutil.copy(source_file, target_file)
+                shutil.copy(os.path.join(source_train, filename), os.path.join(target_dir, filename))
         
-        # Copy từ 'val'
         if os.path.isdir(source_val):
             for filename in os.listdir(source_val):
-                source_file = os.path.join(source_val, filename)
-                target_file = os.path.join(target_dir, filename)
-                shutil.copy(source_file, target_file)
+                shutil.copy(os.path.join(source_val, filename), os.path.join(target_dir, filename))
                 
         print(f"[XONG] Đã gộp {class_code} -> {class_name}")
 
     # 6. Di chuyển thư mục train/val gốc
     print("\n=== Bước 6: Lưu trữ thư mục gốc ===")
     os.makedirs("data/original", exist_ok=True)
-    run_command("mv data/imagenette/train data/original/")
-    run_command("mv data/imagenette/val data/original/")
+    
+    if os.path.exists("data/imagenette/train"):
+        run_command("mv data/imagenette/train data/original/")
+    if os.path.exists("data/imagenette/val"):
+        run_command("mv data/imagenette/val data/original/")
 
     # 7. Xóa file nén
     print("\n=== Bước 7: Xóa file nén ===")
-    run_command("rm -rf data/imagenette/imagenette-160.tgz")
+    if os.path.exists("data/imagenette/imagenette-160.tgz"):
+        run_command("rm -rf data/imagenette/imagenette-160.tgz")
 
-    print("\n✅ Hoàn tất! Tất cả các ảnh đã được gộp và đổi tên.")
+    # 8. Tạo subset
+    subset_root = os.path.join('data', 'subset')
+    # Xóa subset cũ nếu có để đảm bảo sạch sẽ trước khi tạo mới và đổi tên
+    if os.path.exists(subset_root):
+        shutil.rmtree(subset_root)
+        
+    src_root = os.path.join('data', 'imagenette')
+    create_subset(src_root, subset_root, num_samples=10)
+
+    # 9. Đổi tên ảnh trong subset
+    rename_subset_images(subset_root)
+
+    print("\n✅ Hoàn tất! Dữ liệu đã sẵn sàng.")
 
 
 if __name__ == "__main__":
