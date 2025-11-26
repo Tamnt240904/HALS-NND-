@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import torch
 import torchvision.transforms as T
 from PIL import Image
+import cv2
 
 # ============================================================================
 # Similarity Metrics
@@ -139,5 +140,51 @@ def load_image(image_path: str) -> torch.Tensor:
     image = Image.open(image_path).convert('RGB')
     image_tensor = transform(image).unsqueeze(0)
     return image_tensor
+
+
+
+
+
+def denormalize_tensor(tensor):
+    """
+    Chuyển tensor (đã normalize theo ImageNet) về ảnh RGB chuẩn (numpy) để hiển thị.
+    Input: Tensor (3, H, W) hoặc (1, 3, H, W)
+    Output: Numpy array (H, W, 3) range [0, 1]
+    """
+    if tensor.dim() == 4:
+        tensor = tensor.squeeze(0)
+    
+    mean = torch.tensor([0.485, 0.456, 0.406], device=tensor.device).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=tensor.device).view(3, 1, 1)
+    
+    tensor = tensor * std + mean
+    img_np = torch.clamp(tensor, 0, 1).permute(1, 2, 0).cpu().detach().numpy()
+    return img_np
+
+def create_heatmap_overlay(img_path, activation_map, alpha=0.6):
+    """
+    Tạo ảnh overlay heatmap lên ảnh gốc.
+    """
+    from PIL import Image
+    
+    # Load ảnh gốc
+    img_pil = Image.open(img_path).convert('RGB').resize((224, 224))
+    img_np = np.array(img_pil)
+    
+    # Chuẩn hóa activation map về 0-255
+    heatmap = activation_map
+    if isinstance(heatmap, torch.Tensor):
+        heatmap = heatmap.cpu().numpy()
+        
+    heatmap = cv2.resize(heatmap, (224, 224))
+    heatmap = np.uint8(255 * (heatmap - np.min(heatmap)) / (np.max(heatmap) - np.min(heatmap) + 1e-8))
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    
+    # Chuyển ảnh gốc sang BGR để khớp với OpenCV
+    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+    
+    # Blend
+    overlay = cv2.addWeighted(img_bgr, alpha, heatmap, 1-alpha, 0)
+    return cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
 

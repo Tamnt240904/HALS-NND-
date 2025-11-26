@@ -1,3 +1,5 @@
+# FILE: src/analysis.py
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -5,6 +7,8 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from typing import List, Tuple, Optional
 import os
+
+# Import từ các module nội bộ
 from .utils import *
 from .gradcam import GradCAM
 
@@ -13,48 +17,29 @@ from .gradcam import GradCAM
 # ============================================================================
 
 def l1_code_batch(A_batch, D_atoms, lam=1e-2, iters=100, nonneg=True):
-    """
-    Batch version of L1 coding for multiple activation maps.
-    
-    Args:
-        A_batch: (batch_size, d, d) - batch of activation maps
-        D_atoms: (m, d, d) - dictionary atoms
-        lam: L1 regularization
-        iters: iterations
-        nonneg: non-negativity constraint
-        
-    Returns:
-        W: (batch_size, m) - sparse codes for all maps
-    """
+    """Batch version of L1 coding for multiple activation maps."""
     batch_size = A_batch.shape[0]
     d = A_batch.shape[1]
     m = D_atoms.shape[0]
     
-    # Flatten everything: D: (m, d^2), A: (batch, d^2)
     D = D_atoms.reshape(m, -1).T  # (d^2, m)
     A = A_batch.reshape(batch_size, -1)  # (batch, d^2)
     
-    # Precompute Gram matrix and correlation (shared across batch)
-    G = D.T @ D  # (m, m)
-    B = A @ D  # (batch, m)
+    G = D.T @ D
+    B = A @ D
     
-    diagG = np.diag(G)  # (m,)
+    diagG = np.diag(G)
     W = np.zeros((batch_size, m))
     
-    # Coordinate descent with vectorized batch operations
     for _ in range(iters):
         for j in range(m):
-            # Vectorized residual computation for all samples
             residual = B[:, j] - (W @ G[:, j] - W[:, j] * G[j, j])
-            
             if nonneg:
                 W[:, j] = np.maximum(0.0, (residual - lam) / (diagG[j] + 1e-12))
             else:
                 v = np.sign(residual) * np.maximum(np.abs(residual) - lam, 0.0)
                 W[:, j] = v / (diagG[j] + 1e-12)
-    
     return W
-
 
 def l1_code(A, D_atoms, lam=1e-2, iters=100, nonneg=False):
     """Single map version (kept for compatibility)"""
@@ -74,9 +59,8 @@ def l1_code(A, D_atoms, lam=1e-2, iters=100, nonneg=False):
                 w[j] = v / (G[j, j] + 1e-12)
     return w
 
-
 def l1_code_nonneg(A, D_atoms, lam=1e-2, iters=100, tol=1e-6):
-    """FISTA version (kept for compatibility)"""
+    """FISTA version"""
     D = np.stack([Di.reshape(-1) for Di in D_atoms], axis=1)
     a = A.reshape(-1)
     DTD = D.T @ D
@@ -102,7 +86,6 @@ def l1_code_nonneg(A, D_atoms, lam=1e-2, iters=100, tol=1e-6):
         t += 1
     return w
 
-
 # ============================================================================
 # Optimized TopKActivationAnalyzer
 # ============================================================================
@@ -118,164 +101,22 @@ class TopKActivationAnalyzer:
         self.device = device
         self.gradcam = GradCAM(model, target_layer)
     
-    def get_top_k_maps(self, image: torch.Tensor, k: int = 5, 
-                       class_idx: Optional[int] = None) -> Tuple[List[torch.Tensor], List[int], torch.Tensor]:
-        image = image.to(self.device)
-        weights, _, pred_class = self.gradcam.forward(image, class_idx=class_idx)
-        activations = self.gradcam.activations.squeeze().cpu()
-        top_k_indices = torch.argsort(weights, descending=True)[:k].cpu().numpy()
-        top_maps = [activations[idx] for idx in top_k_indices]
-        return top_maps, top_k_indices.tolist(), weights
-    
-    def analyze_sparse_codes(self, activation_maps: List[torch.Tensor], 
-                            lam: float = 1e-2, iters: int = 100, 
-                            nonneg: bool = True) -> List[np.ndarray]:
-        sparse_codes = []
-        for A in activation_maps:
-            A_np = A.numpy() if torch.is_tensor(A) else A
-            w = l1_code(A_np, self.dictionary, lam=lam, iters=iters, nonneg=nonneg)
-            sparse_codes.append(w)
-        return sparse_codes
-    
-    def visualize_analysis(self, image: torch.Tensor, k: int = 5, 
-                          class_idx: Optional[int] = None, 
-                          lam: float = 1e-2) -> dict:
-        top_maps, top_indices, all_weights = self.get_top_k_maps(image, k, class_idx)
-        sparse_codes = self.analyze_sparse_codes(top_maps, lam=lam)
-        
-        results = {
-            'top_maps': top_maps,
-            'top_indices': top_indices,
-            'all_weights': all_weights.cpu().numpy(),
-            'sparse_codes': sparse_codes,
-            'top_weights': all_weights[top_indices].cpu().numpy(),
-            'input_image': image
-        }
-        
-        print(f"\n{'='*70}")
-        print(f"Top-{k} Most Influential Activation Maps Analysis")
-        print(f"{'='*70}")
-        
-        for i, (idx, w, code) in enumerate(zip(top_indices, results['top_weights'], sparse_codes)):
-            print(f"\nRank {i+1}: Channel {idx}")
-            print(f"  GradCAM Weight: {w:.6f}")
-            print(f"  Sparse Code Stats:")
-            print(f"    - Non-zero atoms: {np.sum(np.abs(code) > 1e-6)}/{len(code)}")
-            print(f"    - L1 norm: {np.sum(np.abs(code)):.6f}")
-            print(f"    - Max coefficient: {np.max(np.abs(code)):.6f}")
-            print(f"    - Top 5 atom indices: {np.argsort(np.abs(code))[-5:][::-1].tolist()}")
-            print(f"    - Top 5 coefficients: {code[np.argsort(np.abs(code))[-5:][::-1]]}")
-        
-        print(f"\n{'='*70}\n")
-        return results
-    
-    def visualize_channel_decomposition(self, results: dict, channel_rank: int = 0, 
-                                       figsize: Tuple[int, int] = (15, 10),
-                                       save_path: Optional[str] = None):
-        if channel_rank >= len(results['top_maps']):
-            raise ValueError(f"channel_rank {channel_rank} out of range")
-        
-        input_image = results['input_image']
-        activation_map = results['top_maps'][channel_rank]
-        sparse_code = results['sparse_codes'][channel_rank]
-        channel_idx = results['top_indices'][channel_rank]
-        gradcam_weight = results['top_weights'][channel_rank]
-        
-        top_atom_indices = np.argsort(np.abs(sparse_code))[-4:][::-1]
-        top_atom_weights = sparse_code[top_atom_indices]
-        
-        act_map_np = activation_map.numpy() if torch.is_tensor(activation_map) else activation_map
-        target_size = act_map_np.shape
-        
-        input_np = input_image.squeeze(0).cpu().numpy()
-        mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
-        std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
-        input_denorm = input_np * std + mean
-        input_denorm = np.clip(input_denorm, 0, 1)
-        input_denorm = np.transpose(input_denorm, (1, 2, 0))
-        
-        input_pil = Image.fromarray((input_denorm * 255).astype(np.uint8))
-        input_downscaled = input_pil.resize(target_size[::-1], Image.BILINEAR)
-        input_downscaled = np.array(input_downscaled) / 255.0
-        
-        fig, axes = plt.subplots(3, 2, figsize=figsize)
-        fig.suptitle(f'Channel {channel_idx} Decomposition (Rank {channel_rank + 1})\n'
-                    f'GradCAM Weight: {gradcam_weight:.4f}', 
-                    fontsize=16, fontweight='bold')
-        
-        axes[0, 0].imshow(input_downscaled)
-        axes[0, 0].set_title('Original Image\n(Downscaled)', fontsize=12, fontweight='bold')
-        axes[0, 0].axis('off')
-        
-        axes[0, 1].imshow(act_map_np, cmap='gray')
-        axes[0, 1].set_title(f'Activation Map\n(Channel {channel_idx})', fontsize=12, fontweight='bold')
-        axes[0, 1].axis('off')
-        
-        dict_np = self.dictionary
-        for i, (atom_idx, weight) in enumerate(zip(top_atom_indices, top_atom_weights)):
-            row = (i // 2) + 1
-            col = i % 2
-            atom = dict_np[atom_idx]
-            axes[row, col].imshow(atom, cmap='gray')
-            axes[row, col].set_title(f'Atom {atom_idx}\nWeight: {weight:.4f}', 
-                                     fontsize=11, fontweight='bold')
-            axes[row, col].axis('off')
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Saved visualization to: {save_path}")
-        
-        plt.show()
-    
-    def visualize_all_top_channels(self, results: dict, save_dir: Optional[str] = None):
-        if save_dir:
-            os.makedirs(save_dir, exist_ok=True)
-        
-        for i in range(len(results['top_maps'])):
-            save_path = None
-            if save_dir:
-                channel_idx = results['top_indices'][i]
-                save_path = os.path.join(save_dir, f'channel_{channel_idx}_rank_{i+1}.png')
-            self.visualize_channel_decomposition(results, channel_rank=i, save_path=save_path)
-    
     def analyze_image_batch(self, images: torch.Tensor, k: int = 5, 
                            lam: float = 1e-2, verbose: bool = False) -> List[dict]:
-        """
-        Batch analyze multiple images efficiently.
-        
-        Args:
-            images: (batch_size, 3, H, W) - batch of images
-            k: top-k channels
-            lam: L1 regularization
-            verbose: print debug info
-            
-        Returns:
-            List of analysis results for each image
-        """
+        """Batch analyze multiple images efficiently."""
         batch_size = images.shape[0]
         results_list = []
-        
         images = images.to(self.device)
         
-        # Process each image (GradCAM requires individual processing)
         for i in range(batch_size):
             img = images[i:i+1]
-            
-            # Get weights and activations
             weights, _, pred_class = self.gradcam.forward(img)
-            activations = self.gradcam.activations.squeeze().cpu()  # (C, H, W)
-            n_channels = activations.shape[0]
+            activations = self.gradcam.activations.squeeze().cpu()
+            activations_np = activations.numpy()
             
-            # Convert all activations to numpy for batch processing
-            activations_np = activations.numpy()  # (C, H, W)
-            
-            # Batch compute sparse codes for ALL channels at once
             sparse_codes = l1_code_batch(activations_np, self.dictionary, 
                                         lam=lam, iters=100, nonneg=True)
             
-            # Get top-k indices
             top_k_indices = torch.argsort(weights, descending=True)[:k].cpu().numpy()
             
             results_list.append({
@@ -284,54 +125,29 @@ class TopKActivationAnalyzer:
                 'top_k_indices': top_k_indices.tolist(),
                 'pred_class': pred_class
             })
-            
-            if verbose and (i + 1) % 10 == 0:
-                print(f"Processed {i+1}/{batch_size} images")
-        
         return results_list
-    
-    def analyze_image(self, image: torch.Tensor, k: int = 5, 
-                     lam: float = 1e-2, verbose: bool = False) -> dict:
-        """Backward compatible single image analysis."""
-        results = self.analyze_image_batch(image.unsqueeze(0) if image.dim() == 3 else image, 
-                                          k=k, lam=lam, verbose=verbose)
-        return results[0]
-
 
 # ============================================================================
 # Optimized similarity computation
 # ============================================================================
 
 def compute_similarity_matrix_vectorized(results_list: List[dict], k: int = 5) -> dict:
-    """
-    Vectorized computation of similarity matrices for all pairs.
-    
-    Returns:
-        dict with keys 'weight', 'sparse', 'topk' containing similarity matrices
-    """
+    """Vectorized computation of similarity matrices."""
     n = len(results_list)
+    weights_matrix = np.stack([r['weights'] for r in results_list])
+    sparse_matrix = np.stack([r['sparse_codes'] for r in results_list])
     
-    # Stack all data
-    weights_matrix = np.stack([r['weights'] for r in results_list])  # (n, C)
-    sparse_matrix = np.stack([r['sparse_codes'] for r in results_list])  # (n, C, m)
-    
-    # 1. Weight similarity (cosine similarity matrix)
     from sklearn.metrics.pairwise import cosine_similarity
-    weight_sim_matrix = cosine_similarity(weights_matrix)  # (n, n)
+    weight_sim_matrix = cosine_similarity(weights_matrix)
     
-    # 2. Sparse code similarity (average cosine over channels)
     n_channels = sparse_matrix.shape[1]
     sparse_sim_matrix = np.zeros((n, n))
-    
     for ch in range(n_channels):
-        sparse_ch = sparse_matrix[:, ch, :]  # (n, m)
+        sparse_ch = sparse_matrix[:, ch, :]
         sparse_sim_matrix += cosine_similarity(sparse_ch)
+    sparse_sim_matrix /= n_channels
     
-    sparse_sim_matrix /= n_channels  # Average over channels
-    
-    # 3. Top-K Jaccard similarity
     topk_sim_matrix = np.zeros((n, n))
-    
     for i in range(n):
         for j in range(i, n):
             setA = set(results_list[i]['top_k_indices'])
@@ -346,76 +162,47 @@ def compute_similarity_matrix_vectorized(results_list: List[dict], k: int = 5) -
         'topk': topk_sim_matrix
     }
 
-
 # ============================================================================
-# OPTIMIZED run_complete_analysis
+# MAIN ANALYSIS FUNCTIONS
 # ============================================================================
 
-def run_complete_analysis(model, target_layer, D,
-                         subset_paths: List[Tuple[str, int]], 
-                         k: int = 5, lam: float = 1e-2,
-                         batch_size: int = 8):
-    """
-    OPTIMIZED: Run complete analysis with batch processing.
-    
-    Args:
-        model: Pre-trained model
-        target_layer: Target layer for analysis
-        D: Dictionary atoms
-        subset_paths: List of (image_path, label) tuples
-        k: Number of top channels
-        lam: L1 regularization
-        batch_size: Batch size for processing (adjust based on GPU memory)
-    """
+def run_complete_analysis(model, target_layer, D, subset_paths, k=5, lam=1e-2, batch_size=8):
+    """Run complete analysis with batch processing."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    print("\nLoading model and dictionary...")
     analyzer = TopKActivationAnalyzer(model, target_layer, D, device)
-    
-    # Batch load and process images
-    print(f"\nAnalyzing {len(subset_paths)} images in batches of {batch_size}...")
-    
     all_results = []
     labels = []
     
     n_batches = (len(subset_paths) + batch_size - 1) // batch_size
+    print(f"\nAnalyzing {len(subset_paths)} images in batches of {batch_size}...")
     
     for batch_idx in range(n_batches):
         start_idx = batch_idx * batch_size
         end_idx = min(start_idx + batch_size, len(subset_paths))
         batch_paths = subset_paths[start_idx:end_idx]
         
-        # Load batch of images
         images_batch = []
         batch_labels = []
-        
         for path, label in batch_paths:
             img_tensor = load_image(path)
             images_batch.append(img_tensor)
             batch_labels.append(label)
-        
-        # Stack into batch tensor
-        images_batch = torch.cat(images_batch, dim=0)  # (batch, 3, H, W)
-        
-        # Batch analyze
+            
+        images_batch = torch.cat(images_batch, dim=0)
         batch_results = analyzer.analyze_image_batch(images_batch, k=k, lam=lam)
         
         all_results.extend(batch_results)
         labels.extend(batch_labels)
-        
-        print(f"Processed batch {batch_idx + 1}/{n_batches} ({end_idx}/{len(subset_paths)} images)")
+        print(f"Processed batch {batch_idx + 1}/{n_batches}")
     
-    # Wrap results with metadata
     results = [{'path': subset_paths[i][0], 'label': labels[i], 'analysis': all_results[i]} 
                for i in range(len(all_results))]
     
-    # Compute similarity matrices (vectorized)
-    print("\nComputing similarity matrices (vectorized)...")
+    print("\nComputing similarity matrices...")
     sim_matrices = compute_similarity_matrix_vectorized(all_results, k=k)
     
-    # Extract intra vs inter class similarities
-    print("\nExtracting intra/inter-class similarities...")
     intra = {'weight': [], 'sparse': [], 'topk': []}
     inter = {'weight': [], 'sparse': [], 'topk': []}
     
@@ -423,39 +210,169 @@ def run_complete_analysis(model, target_layer, D,
     for i in range(n):
         for j in range(i+1, n):
             for metric in ['weight', 'sparse', 'topk']:
-                sim_value = sim_matrices[metric][i, j]
-                
+                val = sim_matrices[metric][i, j]
                 if labels[i] == labels[j]:
-                    intra[metric].append(sim_value)
+                    intra[metric].append(val)
                 else:
-                    inter[metric].append(sim_value)
-    
-    # Print summary
-    print("\n" + "="*70)
-    print("INTRA-CLASS SIMILARITY (same class)")
-    print("="*70)
-    for metric, values in intra.items():
-        print(f"{metric:10s}: mean={np.mean(values):.4f}, std={np.std(values):.4f}")
-    
-    print("\n" + "="*70)
-    print("INTER-CLASS SIMILARITY (different classes)")
-    print("="*70)
-    for metric, values in inter.items():
-        print(f"{metric:10s}: mean={np.mean(values):.4f}, std={np.std(values):.4f}")
-    
-    print("\n" + "="*70)
-    print("DIFFERENCE (Intra - Inter)")
-    print("="*70)
-    for metric in intra.keys():
-        diff = np.mean(intra[metric]) - np.mean(inter[metric])
-        print(f"{metric:10s}: {diff:+.4f}")
-    
-    # Visualize
+                    inter[metric].append(val)
+                    
     visualize_similarity_distributions(intra, inter)
     
     return {
-        'intra': intra,
-        'inter': inter,
+        'intra': intra, 'inter': inter,
         'results': results,
         'similarity_matrices': sim_matrices
     }
+
+# ============================================================================
+# ATOM CHARACTERISTIC ANALYSIS (Moved from Notebook)
+# ============================================================================
+
+def visualize_atom_overlap_matrix(overlap_matrix: np.ndarray, class_names: List[str]):
+    """Visualize the atom overlap matrix as a heatmap."""
+    plt.figure(figsize=(5, 4))
+    
+    mask = np.eye(len(class_names), dtype=bool)
+    overlap_masked = np.ma.masked_where(mask, overlap_matrix)
+    
+    plt.imshow(overlap_masked, cmap='RdYlGn', vmin=0, vmax=1, aspect='auto')
+    plt.colorbar(label='Jaccard Similarity')
+    
+    plt.xticks(range(len(class_names)), class_names, rotation=45, ha='right', fontsize=8)
+    plt.yticks(range(len(class_names)), class_names, fontsize=8)
+    
+    for i in range(len(class_names)):
+        for j in range(len(class_names)):
+            if i != j and overlap_matrix[i, j] > 0:
+                plt.text(j, i, f'{overlap_matrix[i, j]:.2f}', 
+                        ha='center', va='center', fontsize=6)
+    
+    plt.title('Top Characteristic Atoms Overlap', fontsize=10, fontweight='bold')
+    plt.tight_layout()
+    os.makedirs('figures', exist_ok=True)
+    plt.savefig('figures/atom_overlap_matrix.png', dpi=150, bbox_inches='tight')
+    plt.show()
+
+def analyze_class_characteristic_atoms(results: List[dict], n_atoms: int, 
+                                       top_k_atoms: int = 10, threshold: float = 0.1,
+                                       top_channels: int = 10):
+    """Analyze which atoms are characteristic for each class."""
+    
+    # 1. Extract class names
+    label_to_class_name = {}
+    for r in results:
+        path = r['path']
+        label = r['label']
+        class_name = path.split('/')[-2]
+        label_to_class_name[label] = class_name
+    
+    sorted_labels = sorted(label_to_class_name.keys())
+    class_names = [label_to_class_name[label] for label in sorted_labels]
+    n_classes = len(class_names)
+    
+    # 2. Aggregate stats
+    class_codes = {i: [] for i in range(n_classes)}
+    for r in results:
+        label = r['label']
+        sparse_codes = r['analysis']['sparse_codes']
+        weights = r['analysis']['weights']
+        top_channel_indices = np.argsort(weights)[-top_channels:]
+        top_codes = sparse_codes[top_channel_indices]
+        avg_code = np.mean(np.abs(top_codes), axis=0)
+        class_codes[label].append(avg_code)
+    
+    # 3. Compute characteristics
+    class_characteristic_atoms = {}
+    
+    print(f"\n{'='*60}\nCLASS-CHARACTERISTIC ATOMS ANALYSIS\n{'='*60}")
+    
+    for class_idx in range(n_classes):
+        if not class_codes[class_idx]: continue
+        
+        codes = np.array(class_codes[class_idx])
+        mean_act = np.mean(codes, axis=0)
+        usage = np.mean(codes > 1e-6, axis=0)
+        scores = mean_act * usage
+        
+        top_indices = np.argsort(scores)[-top_k_atoms:][::-1]
+        
+        characteristic = []
+        for atom_idx in top_indices:
+            if scores[atom_idx] >= threshold:
+                characteristic.append({
+                    'atom_idx': int(atom_idx),
+                    'score': float(scores[atom_idx]),
+                    'mean_activation': float(mean_act[atom_idx]),
+                    'usage_rate': float(usage[atom_idx])
+                })
+        class_characteristic_atoms[class_idx] = characteristic
+
+    # 4. Cross-class analysis
+    top_atoms_per_class = {}
+    for class_idx, atoms in class_characteristic_atoms.items():
+        if atoms:
+            top_atoms_per_class[class_idx] = [a['atom_idx'] for a in atoms[:5]]
+            
+    atom_class_map = {}
+    for class_idx, atom_list in top_atoms_per_class.items():
+        for atom_idx in atom_list:
+            if atom_idx not in atom_class_map: atom_class_map[atom_idx] = []
+            atom_class_map[atom_idx].append(class_idx)
+            
+    unique_atoms = {atom: classes[0] for atom, classes in atom_class_map.items() if len(classes) == 1}
+    
+    # 5. Overlap Matrix
+    overlap_matrix = np.zeros((n_classes, n_classes))
+    for i in range(n_classes):
+        for j in range(n_classes):
+            if i in top_atoms_per_class and j in top_atoms_per_class:
+                atoms_i = set(top_atoms_per_class[i])
+                atoms_j = set(top_atoms_per_class[j])
+                # Sử dụng hàm jaccard_sim từ utils
+                overlap_matrix[i, j] = jaccard_sim(list(atoms_i), list(atoms_j))
+    
+    visualize_atom_overlap_matrix(overlap_matrix, class_names)
+    
+    return {
+        'characteristic_atoms': class_characteristic_atoms,
+        'unique_atoms': unique_atoms,
+        'class_names': class_names,
+        'overlap_matrix': overlap_matrix
+    }
+
+def visualize_unique_atoms_grid(atom_analysis: dict, D: torch.Tensor, figsize=(6, 6)):
+    """Visualize the first unique atom for each class."""
+    unique_atoms = atom_analysis['unique_atoms']
+    class_names = atom_analysis['class_names']
+    
+    class_unique_atoms = {}
+    for atom_idx, class_idx in unique_atoms.items():
+        if class_idx not in class_unique_atoms:
+            class_unique_atoms[class_idx] = []
+        class_unique_atoms[class_idx].append(atom_idx)
+    
+    classes_with_unique = sorted(class_unique_atoms.keys())
+    
+    fig, axes = plt.subplots(3, 3, figsize=figsize)
+    axes = axes.flatten()
+    
+    for idx, class_idx in enumerate(classes_with_unique):
+        if idx >= 9: break
+        ax = axes[idx]
+        
+        first_atom_idx = class_unique_atoms[class_idx][0]
+        atom = D[first_atom_idx]
+        if torch.is_tensor(atom): atom = atom.cpu().numpy()
+            
+        ax.imshow(atom, cmap='gray')
+        ax.set_title(f"{class_names[class_idx]}\nAtom {first_atom_idx}", fontsize=8)
+        ax.axis('off')
+        
+    for idx in range(len(classes_with_unique), 9):
+        axes[idx].axis('off')
+        
+    plt.tight_layout()
+    os.makedirs('figures', exist_ok=True)
+    plt.savefig('figures/unique_atoms_grid.png', dpi=150)
+    print("Saved visualization to: figures/unique_atoms_grid.png")
+    plt.show()
