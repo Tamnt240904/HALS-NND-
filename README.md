@@ -1,16 +1,41 @@
 # HALS-NND-
 
-## Bước 1: 
+## Bước 1: Cài uv
+```bash
+pip install uv
+```
+
+## Bước 2: 
+Nếu chưa clone
 ```bash
 git clone https://github.com/Tamnt240904/HALS-NND-.git
 cd HALS-NND-
-mkdir weights
-gdown 1gxuNfXk4kP_gLd0s53y5XluRR8A6kERT -O weights/
+```
+Nếu muốn pull 
+
+```bash
+git config --global pull.rebase false
 ```
 
-## Bước 2:
+## Bước 3: Kích hoạt uv venv
 ```bash
-python preprocess.py
+uv sync 
 ```
-## Bước 3
-Chạy file main.ipynb
+Với Linux:
+```bash
+source .venv/bin/activate
+```
+
+Với Window:
+```bash
+.venv\Scripts\activate
+```
+## Bước 4
+Với Linux
+```bash
+source cmd
+```
+Với Window
+```bash
+cmd
+```

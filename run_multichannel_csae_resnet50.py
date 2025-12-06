@@ -736,7 +736,7 @@ if __name__ == "__main__":
 
     LR = 1e-3
     WEIGHT_DECAY = 1e-5
-    EPOCHS = 1
+    EPOCHS = 15
 
     print(f"\nTraining Configuration:")
     print(f"  Backbone: ResNet50 (pretrained ImageNet)")
