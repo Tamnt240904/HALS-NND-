@@ -296,3 +296,4 @@ def hals_nnd_correct(
     print(f"{'='*70}")
     
     return best_D, best_W, loss_history
+
