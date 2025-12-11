@@ -408,7 +408,7 @@ def main():
                        help='Path to input image')
     parser.add_argument('--class_name', type=str,
                        help='Class name to sample images from (alternative to --image_path)')
-    parser.add_argument('--num_images', type=int, default=1,
+    parser.add_argument('--num_images', type=int, default=10,
                        help='Number of images to process per class (if using --class_name or processing all classes)')
     parser.add_argument('--data_dir', type=str, default='data/imagenette',
                        help='Path to Imagenette dataset')
