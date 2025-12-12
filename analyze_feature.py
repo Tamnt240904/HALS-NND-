@@ -136,22 +136,88 @@ class FeatureAnalyzer:
             'stats': stats,
         }
         
-    def get_top_k_channels(self, feature_weights: np.ndarray, k: int = 8) -> List[Tuple[int, float]]:
-        """
-        Lấy top-k channels theo absolute weight.
+    # def get_top_k_channels(self, feature_weights: np.ndarray, k: int = 8) -> List[Tuple[int, float]]:
+    #     """
+    #     Lấy top-k channels theo absolute weight.
         
-        Args:
-            feature_weights: [1024] weights
-            k: Number of top channels
+    #     Args:
+    #         feature_weights: [1024] weights
+    #         k: Number of top channels
         
-        Returns:
-            List of (channel_idx, weight) sorted by |weight| descending
-        """
-        abs_weights = np.abs(feature_weights)
-        top_k_indices = np.argsort(abs_weights)[::-1][:k]
+    #     Returns:
+    #         List of (channel_idx, weight) sorted by |weight| descending
+    #     """
+    #     abs_weights = np.abs(feature_weights)
+    #     top_k_indices = np.argsort(abs_weights)[::-1][:k]
         
-        return [(int(idx), float(feature_weights[idx])) for idx in top_k_indices]
+    #     return [(int(idx), float(feature_weights[idx])) for idx in top_k_indices]
     
+
+
+    def get_top_k_channels(self, weights, activations=None, k=64, pool_size=1000, threshold=1e-5):
+            """
+            Lấy top k channels dựa trên độ lớn của weights (L1 norm), 
+            nhưng lọc bỏ các channel có activation = 0 (nếu có tham số activations).
+            """
+            
+            # --- FIX 1: Chuyển đổi weights từ Numpy sang Tensor nếu cần ---
+            if isinstance(weights, np.ndarray):
+                weights = torch.from_numpy(weights).float().to(self.device)
+                
+            # Đảm bảo activations cũng ở trên cùng device nếu có
+            if activations is not None:
+                activations = activations.to(self.device)
+    
+            # 1. Tính độ quan trọng của từng channel dựa trên Weights (L1 Norm)
+            # Shape: (Out_channels)
+            weight_importance = weights.view(weights.size(0), -1).norm(p=1, dim=1)
+    
+            # Nếu KHÔNG truyền activations vào -> Chỉ lấy top K theo weight như cũ
+            if activations is None:
+                _, top_indices = torch.topk(weight_importance, k)
+                return top_indices.tolist() 
+    
+            # 2. Nếu CÓ truyền activations -> Logic lọc "Weight + Active"
+    
+            # Bước A: Lấy danh sách ứng viên tiềm năng (pool) theo weight
+            actual_pool_size = min(pool_size, weights.size(0))
+            _, candidate_indices = torch.topk(weight_importance, actual_pool_size)
+    
+            # Bước B: Chuẩn bị dữ liệu activation để check nhanh
+            if len(activations.shape) == 4:
+                # (1, C, H, W) -> (C)
+                act_strength = activations.view(activations.size(1), -1).abs().sum(dim=1)
+            else:
+                # Fallback nếu shape khác
+                act_strength = activations.view(activations.size(0), -1).abs().sum(dim=1)
+    
+            final_indices = []
+    
+            # Bước C: Duyệt qua các ứng viên (đã sort theo weight) và lọc
+            # Lưu ý: candidate_indices đang ở trên GPU, cần .tolist() để loop Python nhanh hơn
+            candidate_indices_list = candidate_indices.tolist()
+            
+            for idx_val in candidate_indices_list:
+                # Kiểm tra xem channel này có hoạt động với ảnh hiện tại không
+                if act_strength[idx_val] > threshold:
+                    # Lưu kèm weight gốc để hiển thị (tùy chọn, ở đây chỉ lưu index)
+                    # Nhưng hàm visualize của bạn cần trả về list of tuples (idx, weight)
+                    # Logic cũ của bạn trả về indices, nhưng visualize lại expect tuples.
+                    # Tôi sẽ sửa để trả về đúng format [(idx, weight_val), ...]
+                    
+                    weight_val = weights[idx_val].item() # Lấy giá trị scalar
+                    final_indices.append((int(idx_val), float(weight_val)))
+    
+                # Nếu đã gom đủ k channel thì dừng
+                if len(final_indices) == k:
+                    break
+                
+            # Trường hợp hiếm: Duyệt hết pool mà vẫn chưa đủ k
+            if len(final_indices) < k:
+                print(f"Warning: Chỉ tìm thấy {len(final_indices)} channel active trong top {actual_pool_size} weights.")
+    
+            return final_indices
+
     def extract_channel_activations(self, image_path: str) -> torch.Tensor:
         """
         Extract layer3 activations cho một image.
@@ -278,10 +344,16 @@ class FeatureAnalyzer:
         print(f"    - Std: {stats['std']:.6f}")
         print(f"    - Range: [{stats['min']:.6f}, {stats['max']:.6f}]")
         print(f"    - Non-zero: {stats['non_zero_count']}/1024 ({(1-stats['sparsity'])*100:.1f}%)")
-        
-        # 2. Get top-k channels
-        print(f"\n2. Finding top-{top_k} channels by |weight|...")
-        top_channels = self.get_top_k_channels(weights, k=top_k)
+
+        # 2. Extract channel activations from sample image
+        print(f"\n2. Extracting channel activations from image...")
+        print(f"  Image: {image_path}")
+        channel_acts = self.extract_channel_activations(image_path)
+        print(f"  ✓ Activations shape: {channel_acts.shape}")
+
+        # 3. Get top-k channels
+        print(f"\n3. Finding top-{top_k} channels by |weight|...")
+        top_channels = self.get_top_k_channels(weights, activations=channel_acts, k=top_k)
         
         print(f"  ✓ Top-{top_k} channels:")
         for i, (ch_idx, weight) in enumerate(top_channels[:5]):
@@ -289,11 +361,7 @@ class FeatureAnalyzer:
         if len(top_channels) > 5:
             print(f"    ... and {len(top_channels)-5} more")
         
-        # 3. Extract channel activations from sample image
-        print(f"\n3. Extracting channel activations from image...")
-        print(f"  Image: {image_path}")
-        channel_acts = self.extract_channel_activations(image_path)
-        print(f"  ✓ Activations shape: {channel_acts.shape}")
+
         
         # 4. Compute feature activation
         print(f"\n4. Computing feature activation map...")
