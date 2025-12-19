@@ -40,7 +40,6 @@ import random
 
 # Import our model class
 sys.path.append('.')
-from run_multichannel_csae_resnet50 import MultiChannelConvSAE
 from src.gradcam import GradCAM
 
 

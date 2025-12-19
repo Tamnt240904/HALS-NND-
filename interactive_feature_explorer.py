@@ -15,7 +15,6 @@ sys.path.append('.')
 from analyze_feature import FeatureAnalyzer
 from visualize_multichannel_sae_resnet50 import MultiChannelSAEVisualizerR50
 # Import class để tránh lỗi pickle
-from run_multichannel_csae_resnet50 import MultiChannelConvSAE
 
 class InteractiveFeatureExplorer:
     """

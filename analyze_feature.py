@@ -32,7 +32,6 @@ from typing import Dict, List, Tuple
 import sys
 
 sys.path.append('.')
-from run_multichannel_csae_resnet50 import MultiChannelConvSAE, ResNet50ActivationExtractor
 from src.gradcam import GradCAM
 
 
