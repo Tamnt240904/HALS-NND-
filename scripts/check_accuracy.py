@@ -236,7 +236,8 @@ def evaluate_accuracy_drop(model, data_loader, device='cuda', imagenette_to_imag
         'total_samples': total_samples, 'acc_original': acc_orig, 'acc_reconstructed': acc_recon,
         'acc_drop': acc_orig - acc_recon, 'top5_acc_original': top5_correct_original/total_samples*100,
         'top5_acc_reconstructed': top5_correct_reconstructed/total_samples*100,
-        'avg_mse': np.mean(mse_list), 'avg_relative_error': np.mean(rel_err_list), 'avg_sparsity': np.mean(sparsity_list)
+        'acc5_drop': (top5_correct_original/total_samples*100) - (top5_correct_reconstructed/total_samples*100),
+        # 'avg_mse': np.mean(mse_list), 'avg_relative_error': np.mean(rel_err_list), 'avg_sparsity': np.mean(sparsity_list)
     }
 
 def print_results(results, model_name, layer_path):

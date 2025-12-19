@@ -182,10 +182,10 @@ EFFICIENTNET_B4_CONFIGS = {
 
 # DenseNet Models
 DENSENET121_CONFIGS = {
-    'features.denseblock2': ModelLayerConfig(
+    'features.denseblock3': ModelLayerConfig(
         model_name='densenet121',
-        layer_path='features.denseblock2',
-        num_channels=512,
+        layer_path='features.denseblock3',
+        num_channels=1024,
         spatial_size=(14, 14),
         model_loader=lambda: models.densenet121(pretrained=True),
         description="DenseNet121 denseblock2 output"
