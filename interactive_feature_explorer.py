@@ -72,6 +72,7 @@ class InteractiveFeatureExplorer:
         
         if len(self.visual_image_paths) == 0:
             print(f"Warning: No images found in {self.visual_dir}")
+            print(f"Please check if the directory exists and contains images.")
             
         # Current state
         self.current_image_idx = 0
@@ -86,7 +87,12 @@ class InteractiveFeatureExplorer:
     def _scan_images(self):
         """
         Scan images in visual directory (.png) and map them to original directory (.JPEG or .jpg).
-        Assumes the original filename is the visual filename PLUS the suffix '_features_r50'.
+        
+        NEW LOGIC:
+        - Visual file: n02979186_258_resnet50_layer3_features.png
+        - Strip suffix: _resnet50_layer3_features.png OR _MODEL_LAYER_features.png
+        - Original base: n02979186_258
+        - Search in original_dir/class_name/ for n02979186_258.JPEG or .jpg
         
         Returns: (list of visual image paths, list of corresponding original image paths)
         """
@@ -94,50 +100,74 @@ class InteractiveFeatureExplorer:
         original_files = []
         
         if not self.visual_dir.exists():
+            print(f"Error: Visual directory does not exist: {self.visual_dir}")
             return [], []
+        
+        print(f"\nScanning visual directory: {self.visual_dir}")
+        
+        # Common suffixes to strip
+        possible_suffixes = [
+            '_resnet50_layer3_features',
+            '_vgg16_features_16_features',
+            '_features_r50',  # Old suffix
+        ]
+        
+        # Scan visual directory for .png files
+        png_files = list(self.visual_dir.rglob('*.png'))
+        print(f"  Found {len(png_files)} .png files")
+        
+        for visual_path in png_files:
+            if not visual_path.is_file():
+                continue
             
-        # Scan visual directory only for .png files
-        for visual_path in self.visual_dir.rglob('*.png'):
-            if visual_path.is_file():
-                
-                # Get the filename without extension (e.g., 'ILSVRC2012_val_00000213_features_r50')
-                visual_stem = visual_path.stem
-                
-                # Strip the suffix to get the base original file name stem
-                # e.g., 'ILSVRC2012_val_00000213_features_r50' -> 'ILSVRC2012_val_00000213'
-                if visual_stem.endswith('_features_r50'):
-                    original_stem = visual_stem[:-len('_features_r50')]
-                else:
-                    # If suffix is not present, use the visual stem as is (fallback)
-                    original_stem = visual_stem 
-
-                # Get the parent class directory name (e.g., 'n03417042')
-                # Assumes the structure is visual_dir/class_name/image_name.png
-                class_dir_name = visual_path.parent.name
-                
-                # Construct the potential original path components
-                original_parent = self.original_dir / class_dir_name
-                
-                found_original = False
-                
-                # 1. Check for .JPEG (common Imagenet extension)
-                original_path = original_parent / f"{original_stem}.JPEG"
+            # Get the filename without extension
+            visual_stem = visual_path.stem
+            
+            # Strip known suffixes to get original filename base
+            original_stem = visual_stem
+            for suffix in possible_suffixes:
+                if visual_stem.endswith(suffix):
+                    original_stem = visual_stem[:-len(suffix)]
+                    break
+            
+            # Get class directory name
+            class_dir_name = visual_path.parent.name
+            
+            # Construct original parent directory
+            original_parent = self.original_dir / class_dir_name
+            
+            if not original_parent.exists():
+                # Try direct parent (in case visual_dir structure is different)
+                continue
+            
+            # Try to find original file with different extensions
+            found = False
+            for ext in ['.JPEG', '.jpg', '.png', '.jpeg']:
+                original_path = original_parent / f"{original_stem}{ext}"
                 if original_path.exists():
                     visual_files.append(visual_path)
                     original_files.append(original_path)
-                    found_original = True
-                
-                # 2. Check for .jpg (another common Imagenet extension) if .JPEG not found
-                if not found_original:
-                    original_path = original_parent / f"{original_stem}.jpg"
-                    if original_path.exists():
-                        visual_files.append(visual_path)
-                        original_files.append(original_path)
-                        found_original = True
+                    found = True
+                    break
+            
+            if not found:
+                print(f"  Warning: Could not find original for: {visual_path.name}")
+                print(f"    Searched for: {original_stem}.JPEG/.jpg in {original_parent}")
         
-        # Sort both lists based on visual_path for consistent ordering
-        sorted_pairs = sorted(zip(visual_files, original_files), 
-                              key=lambda pair: (pair[0].parent.name, pair[0].name))
+        # Sort both lists for consistent ordering
+        sorted_pairs = sorted(
+            zip(visual_files, original_files), 
+            key=lambda pair: (pair[0].parent.name, pair[0].name)
+        )
+        
+        print(f"\n✓ Successfully mapped {len(sorted_pairs)} visualization files to original images")
+        
+        # Debug: print first few mappings
+        if sorted_pairs:
+            print(f"\nExample mappings (first 3):")
+            for i, (vis, orig) in enumerate(sorted_pairs[:3]):
+                print(f"  {i+1}. Visual: {vis.name}")
+                print(f"     Original: {orig.name}")
         
         return [pair[0] for pair in sorted_pairs], [pair[1] for pair in sorted_pairs]
     
@@ -153,7 +183,7 @@ class InteractiveFeatureExplorer:
 
         self.image_dropdown = Dropdown(
             options=options,
-            value=self.current_image_idx,
+            value=self.current_image_idx if options else None,
             description='Select Image:',
             layout=Layout(width='500px'),
             style={'description_width': '120px'}
@@ -176,7 +206,8 @@ class InteractiveFeatureExplorer:
         self.step2_output = Output()  # Channel contribution analysis
         
         # Bind callbacks
-        self.image_dropdown.observe(self._on_image_change, names='value')
+        if options:  # Only bind if there are images
+            self.image_dropdown.observe(self._on_image_change, names='value')
     
     def _on_image_change(self, change):
         """When user selects a different image, extract and visualize features"""
@@ -195,7 +226,7 @@ class InteractiveFeatureExplorer:
             # Extract features using SAE visualizer
             try:
                 self.current_results = self.sae_visualizer.extract_features(
-                    str(original_image_path), # Pass the original path to the analyzer
+                    str(original_image_path),
                     top_k=self.top_k_features
                 )
                 
@@ -369,6 +400,18 @@ class InteractiveFeatureExplorer:
     def display(self):
         """Display the interactive interface."""
         
+        if len(self.visual_image_paths) == 0:
+            print("="*60)
+            print("ERROR: No images found!")
+            print("="*60)
+            print(f"Visual directory: {self.visual_dir}")
+            print(f"Original directory: {self.original_dir}")
+            print("\nPlease check:")
+            print("1. Visual directory exists and contains .png files")
+            print("2. Original directory has matching image files")
+            print("3. File naming convention matches expected pattern")
+            return
+        
         # Layout
         step1_header = VBox([
             HTML(value="<h3 style='color: #007bff;'>STEP 1: Select Image and View Top Features</h3>"),
@@ -411,9 +454,9 @@ def setup_explorer():
         explorer = setup_explorer()
     """
     explorer = InteractiveFeatureExplorer(
-        csae_model_path='output/weights/multichannel_csae_resnet50_layer3_model.pkl',
+        csae_model_path='output/weights/resnet50_layer3_csae_masked_loss_model.pkl',
         original_dir='data/imagenette',
-        visual_dir='output/visualization',
+        visual_dir='output/visualizations/resnet50',
         top_k_features=16
     )
     explorer.display()
