@@ -11,6 +11,7 @@ dependencies = [
     "kagglehub>=0.3.13",
     "matplotlib>=3.10.7",
     "numpy>=2.3.5",
+    "pandas>=2.3.3",
     "torch>=2.9.1",
     "torchvision>=0.24.1",
 ]

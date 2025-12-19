@@ -273,7 +273,7 @@ def main():
     parser.add_argument('--mode', type=str, default='masked_loss', choices=['masked', 'masked_loss'])
     parser.add_argument('--data_dir', type=str, default='data/imagenette')
     parser.add_argument('--epochs', type=int, default=15)
-    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--list', action='store_true', help='List configs')
     parser.add_argument('--output_prefix', type=str, default=None)

@@ -12,10 +12,16 @@ import sys
 import os
 from pathlib import Path
 import pandas as pd
+import random
 
 sys.path.append('.')
 from config.model_configs import get_model_config, list_available_configs
 from src.base_extractor import MultiChannelConvSAE
+
+RANDOM_SEED = 42 
+torch.manual_seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
+random.seed(RANDOM_SEED)
 
 # Giữ nguyên mapping
 IMAGENETTE_TO_IMAGENET = {
@@ -236,8 +242,8 @@ def evaluate_accuracy_drop(model, data_loader, device='cuda', imagenette_to_imag
         'total_samples': total_samples, 'acc_original': acc_orig, 'acc_reconstructed': acc_recon,
         'acc_drop': acc_orig - acc_recon, 'top5_acc_original': top5_correct_original/total_samples*100,
         'top5_acc_reconstructed': top5_correct_reconstructed/total_samples*100,
-        'acc5_drop': (top5_correct_original/total_samples*100) - (top5_correct_reconstructed/total_samples*100),
-        # 'avg_mse': np.mean(mse_list), 'avg_relative_error': np.mean(rel_err_list), 'avg_sparsity': np.mean(sparsity_list)
+        'acc5_drop': (top5_correct_original/total_samples*100) - (top5_correct_reconstructed/total_samples*100),'avg_mse': np.mean(mse_list), 
+        'avg_relative_error': np.mean(rel_err_list), 'avg_sparsity': np.mean(sparsity_list)
     }
 
 def print_results(results, model_name, layer_path):
@@ -310,7 +316,7 @@ def main():
 
     if args.all and all_results:
         df = pd.DataFrame(all_results)
-        df = df.round(2)
+        df = df.round(3)
         os.makedirs("output", exist_ok=True)
         df.to_csv(args.output_csv, index=False)
         print(f"\nBatch results saved to {args.output_csv}")

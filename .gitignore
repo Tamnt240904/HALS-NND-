@@ -211,3 +211,4 @@ data/
 weights/
 figures/
 output/
+cache_activations/

@@ -216,10 +216,10 @@ DENSENET201_CONFIGS = {
 
 # AlexNet
 ALEXNET_CONFIGS = {
-    'features.10': ModelLayerConfig(
+    'features.6': ModelLayerConfig(
         model_name='alexnet',
-        layer_path='features.10',
-        num_channels=256,
+        layer_path='features.6',
+        num_channels=384,
         spatial_size=(13, 13),
         model_loader=lambda: models.alexnet(pretrained=True),
         description="AlexNet conv5 output (13×13)"

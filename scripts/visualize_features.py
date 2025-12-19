@@ -9,6 +9,9 @@ Usage:
     
     # Visualize multiple images from class
     python scripts/visualize_features.py --model resnet50 --layer layer3 --csae_model resnet50_layer3_csae_masked_loss_model.pkl --class_name golf_ball --num_images 10
+    
+    # Visualize all classes
+    python scripts/visualize_features.py --model resnet50 --layer layer3 --csae_model resnet50_layer3_csae_masked_loss_model.pkl --num_images 10
 """
 
 import torch
@@ -23,10 +26,14 @@ import argparse
 from pathlib import Path
 from typing import List, Tuple, Dict
 import sys
+import random
 
 sys.path.append('.')
 from config.model_configs import get_model_config
 from src.gradcam_fixed import GradCAM
+
+
+RANDOM_SEED = 42
 
 
 class GenericCSAEVisualizer:
@@ -287,7 +294,7 @@ def main():
     parser.add_argument('--class_name', type=str,
                        help='Class name for multiple images')
     parser.add_argument('--num_images', type=int, default=1,
-                       help='Number of images (if using --class_name)')
+                       help='Number of images per class (if using --class_name or processing all classes)')
     parser.add_argument('--data_dir', type=str, default='data/imagenette',
                        help='Dataset directory')
     parser.add_argument('--top_k_features', type=int, default=16,
@@ -304,42 +311,93 @@ def main():
         print(f"Error: {e}")
         return
     
-    # Create visualizer
+    # Setup visualizer
+    print("="*80)
+    print(f"Multi-Channel ConvSAE Feature Visualization ({args.model})")
+    print("="*80 + "\n")
+    
     visualizer = GenericCSAEVisualizer(
         config,
         args.csae_model,
         device='cuda' if torch.cuda.is_available() else 'cpu'
     )
     
-    # Get images
-    image_paths = []
-    if args.image_path:
-        image_paths = [args.image_path]
-    elif args.class_name:
-        class_dir = Path(args.data_dir) / args.class_name
-        if not class_dir.exists():
-            print(f"Error: Class directory not found: {class_dir}")
-            return
-        all_images = list(class_dir.glob('*.JPEG')) + list(class_dir.glob('*.jpg'))
-        image_paths = all_images[:args.num_images]
-    else:
-        print("Error: Specify --image_path or --class_name")
+    # --- Prepare list of images to process: (image_path_str, class_name_for_output) ---
+    images_to_process: List[Tuple[str, str]] = []
+    classes_to_run: List[str] = []
+    
+    data_path = Path(args.data_dir)
+    if not data_path.exists():
+        print(f"Error: Data directory not found: {data_path}")
         return
     
-    # Create output dir
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(exist_ok=True)
+    # Case 1: Single image path is provided
+    if args.image_path:
+        img_path = Path(args.image_path)
+        # Determine class name for output folder (parent directory name, or default)
+        parent_name = img_path.parent.name
+        class_name_for_output = parent_name if parent_name and parent_name != Path(args.data_dir).name else "single_image_run"
+        images_to_process.append((str(img_path), class_name_for_output))
     
-    # Process images
-    print(f"Processing {len(image_paths)} image(s)...\n")
+    # Case 2 & 3: Specific class or ALL classes
+    else:
+        if args.class_name:
+            # Case 2: Specific class provided
+            classes_to_run = [args.class_name]
+            print(f"Processing specific class: {args.class_name}")
+        else:
+            # Case 3: Process ALL classes
+            classes_to_run = [d.name for d in data_path.iterdir() if d.is_dir()]
+            print(f"No specific class/image provided. Processing all {len(classes_to_run)} classes.")
+        
+        # Iterate over selected classes to sample images (args.num_images per class)
+        for class_name in classes_to_run:
+            class_dir = data_path / class_name
+            if not class_dir.exists():
+                print(f"Error: Class directory not found: {class_dir}. Skipping.")
+                continue
+            
+            # Find all images in this class
+            all_images = [p for p in class_dir.iterdir() 
+                         if p.is_file() and p.suffix.lower() in ('.jpeg', '.jpg', '.png')]
+            
+            if len(all_images) == 0:
+                print(f"Warning: No images found in class '{class_name}'. Skipping.")
+                continue
+            
+            # Sample exactly args.num_images (or all if fewer exist)
+            num_to_sample = min(args.num_images, len(all_images))
+            rng = random.Random(RANDOM_SEED)
+            sampled_images = rng.sample(all_images, num_to_sample)
+            
+            # Add to processing list
+            for img_path in sampled_images:
+                images_to_process.append((str(img_path), class_name))
+            
+            print(f"  > Class '{class_name}': Sampled {num_to_sample}/{len(all_images)} images.")
     
-    for i, img_path in enumerate(image_paths):
+    if not images_to_process:
+        print("Error: No images found to process. Check data directory or class names/image paths.")
+        return
+    
+    print(f"\nTotal images to process: {len(images_to_process)} from {len(set([c for _, c in images_to_process]))} class(es)\n")
+    
+    # --- Main Processing and Visualization Loop ---
+    for i, (img_path_str, class_name) in enumerate(images_to_process):
+        img_path = Path(img_path_str)
+        
+        # 1. Define output directory: args.output_dir / class_name
+        output_dir_path = Path(args.output_dir) / args.model / class_name
+        output_dir_path.mkdir(parents=True, exist_ok=True)
+        
+        # 2. Process and visualize
         print(f"\n{'='*80}")
-        print(f"Image {i+1}/{len(image_paths)}")
+        print(f"Image {i+1}/{len(images_to_process)} | Class: {class_name} | File: {img_path.name}")
+        print(f"Saving visualization to: {output_dir_path}")
         print(f"{'='*80}\n")
         
-        img_name = Path(img_path).stem
-        save_path = output_dir / f"{img_name}_{args.model}_{args.layer.replace('.', '_')}_features.png"
+        img_name = img_path.stem
+        save_path = output_dir_path / f"{img_name}_{args.model}_{args.layer.replace('.', '_')}_features.png"
         
         visualizer.visualize_features(
             str(img_path),
@@ -348,7 +406,8 @@ def main():
         )
     
     print(f"\n{'='*80}")
-    print(f"✓ Complete! Saved to: {output_dir}")
+    print(f"✓ All visualizations complete!")
+    print(f"  Output directory base: {Path(args.output_dir)}")
     print(f"{'='*80}")
 
 

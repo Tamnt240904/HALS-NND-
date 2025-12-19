@@ -411,7 +411,7 @@ def setup_explorer():
         explorer = setup_explorer()
     """
     explorer = InteractiveFeatureExplorer(
-        csae_model_path='weights/multichannel_csae_resnet50_model.pkl',
+        csae_model_path='output/weights/multichannel_csae_resnet50_layer3_model.pkl',
         original_dir='data/imagenette',
         visual_dir='output/visualization',
         top_k_features=16
