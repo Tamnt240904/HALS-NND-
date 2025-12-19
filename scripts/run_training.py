@@ -1,14 +1,12 @@
 """
-Generic Multi-Channel ConvSAE Training Script
+Generic Multi-Channel ConvSAE Training Script (Robust Min-Max Normalization)
 
-Supports any model and layer configuration.
-Can run in two modes:
-1. MASKED: Apply GradCAM masking to input activations
-2. MASKED LOSS: Use all channels as input, compute loss only on GradCAM-selected channels
+Key Update: Implements explicit Min-Max normalization to handle models with
+negative activations (DenseNet, EfficientNet) while maintaining performance
+for ReLU-based models (ResNet, VGG).
 
 Usage:
-    python scripts/run_training.py --model vgg16 --layer features.23 
-    python scripts/run_training.py --model resnet50 --layer layer3 
+    python scripts/run_training.py --model densenet121 --layer features.denseblock3
 """
 
 import torch
@@ -31,8 +29,6 @@ sys.path.append('.')
 from config.model_configs import get_model_config, list_available_configs, print_available_configs
 from src.base_extractor import BaseActivationExtractor
 
-# Giả định các class loss và model được định nghĩa trong src hoặc dùng bản mock dưới đây
-# Nếu bạn đã có file riêng, hãy import từ đó.
 from src.base_extractor import (
     MultiChannelConvSAE,
     LateralInhibitionLoss,
@@ -40,6 +36,32 @@ from src.base_extractor import (
     FeatureChannelSparsityLoss,
     masked_reconstruction_loss
 )
+
+def robust_min_max_normalize(activations):
+    """
+    Apply Min-Max normalization to the range [0, 1] to preserve negative
+    activation information (DenseNet / EfficientNet).
+
+    For ReLU-based models (ResNet), this behaves similarly to max normalization.
+    """
+    # X shape: [N, C, H, W]
+    N, C, H, W = activations.shape
+    X_flat = activations.view(N, C, -1)
+    
+    # Compute min and max per sample
+    # (Avoid global min/max to prevent outliers from other images)
+    min_vals = X_flat.min(dim=2, keepdim=True)[0]
+    max_vals = X_flat.max(dim=2, keepdim=True)[0]
+    range_vals = max_vals - min_vals
+    
+    # Avoid division by zero
+    range_vals[range_vals < 1e-8] = 1.0
+    
+    # Normalize: (x - min) / range -> output always in [0, 1]
+    X_norm = (X_flat - min_vals) / range_vals
+    X_norm = X_norm.view(N, C, H, W)
+    
+    return X_norm
 
 def plot_training_logs(logs: Dict[str, List], save_path: str, model_name: str, layer_path: str):
     """Plot training metrics."""
@@ -50,70 +72,41 @@ def plot_training_logs(logs: Dict[str, List], save_path: str, model_name: str, l
     # Row 1: Main losses
     axs[0, 0].plot(logs["recon_loss"], color='blue', linewidth=1.5)
     axs[0, 0].set_title("Reconstruction Loss")
-    axs[0, 0].set_ylabel("MSE")
-    axs[0, 0].set_xlabel("Batch")
-    axs[0, 0].grid(True, alpha=0.3)
+    axs[0, 0].set_yscale('log') 
     
     axs[0, 1].plot(logs["l1_loss"], color='green', linewidth=1.5)
     axs[0, 1].set_title("L1 Sparsity Loss")
-    axs[0, 1].set_ylabel("L1")
-    axs[0, 1].set_xlabel("Batch")
-    axs[0, 1].grid(True, alpha=0.3)
     
     axs[0, 2].plot(logs["channel_sparsity_loss"], color='purple', linewidth=1.5)
     axs[0, 2].set_title("Channel Sparsity Loss")
-    axs[0, 2].set_ylabel("L1 per feature")
-    axs[0, 2].set_xlabel("Batch")
-    axs[0, 2].grid(True, alpha=0.3)
     
-    # Row 2: Regularization
+    # Row 2: Regularization losses
     axs[1, 0].plot(logs["lateral_loss"], color='orange', linewidth=1.5)
     axs[1, 0].set_title("Lateral Inhibition Loss")
-    axs[1, 0].set_ylabel("Correlation")
-    axs[1, 0].set_xlabel("Batch")
-    axs[1, 0].grid(True, alpha=0.3)
     
     axs[1, 1].plot(logs["compact_loss"], color='red', linewidth=1.5)
     axs[1, 1].set_title("Spatial Compactness Loss")
-    axs[1, 1].set_ylabel("Total Variation")
-    axs[1, 1].set_xlabel("Batch")
-    axs[1, 1].grid(True, alpha=0.3)
     
     axs[1, 2].plot(logs["active_pct"], color='teal', linewidth=1.5)
-    axs[1, 2].set_title("Active Channels %")
-    axs[1, 2].set_ylabel("Percent (%)")
-    axs[1, 2].set_xlabel("Batch")
-    axs[1, 2].grid(True, alpha=0.3)
+    axs[1, 2].set_title("Active Channels Percentage")
+    axs[1, 2].set_ylim(0, 100)
     
     # Row 3: Summary
     axs[2, 0].plot(logs["total_loss"], color='black', linewidth=2)
     axs[2, 0].set_title("Total Loss")
-    axs[2, 0].set_ylabel("Loss")
-    axs[2, 0].set_xlabel("Batch")
-    axs[2, 0].grid(True, alpha=0.3)
     
     axs[2, 1].plot(logs["recon_loss"], label='Recon', alpha=0.7)
     axs[2, 1].plot(logs["l1_loss"], label='L1', alpha=0.7)
-    axs[2, 1].plot(logs["lateral_loss"], label='Lateral', alpha=0.7)
     axs[2, 1].set_title("Loss Components")
-    axs[2, 1].set_ylabel("Loss")
-    axs[2, 1].set_xlabel("Batch")
-    axs[2, 1].set_yscale('log')
     axs[2, 1].legend()
-    axs[2, 1].grid(True, alpha=0.3)
+    axs[2, 1].set_yscale('log')
     
-    axs[2, 2].scatter(logs["channel_sparsity_loss"], logs["recon_loss"],
-                     c=range(len(logs["recon_loss"])), cmap='viridis', alpha=0.5, s=5)
-    axs[2, 2].set_title("Recon vs Channel Sparsity")
-    axs[2, 2].set_xlabel("Channel Sparsity Loss")
-    axs[2, 2].set_ylabel("Reconstruction Loss")
-    axs[2, 2].grid(True, alpha=0.3)
+    # Clear unused subplot
+    axs[2, 2].axis('off')
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    print(f"Training logs saved to {save_path}")
     plt.close()
-
 
 def train_csae(
     model_config,
@@ -132,15 +125,12 @@ def train_csae(
     lambda_channel_sparsity: float = 0.0,
     output_prefix: str = None
 ):
-    """
-    Train Multi-Channel ConvSAE on any model/layer.
-    """
     print("="*80)
     print(f"Multi-Channel ConvSAE Training: {model_config.model_name}.{model_config.layer_path}")
-    print(f"Mode: {mode.upper()}")
+    print(f"Mode: {mode.upper()} | Normalization: Robust Min-Max [0, 1]")
     print("="*80)
     
-    # Extract activations
+    # 1. Extract activations (RAW – no normalization)
     use_masking = (mode == 'masked')
     extractor = BaseActivationExtractor(
         model_config,
@@ -149,18 +139,25 @@ def train_csae(
         use_masking=use_masking
     )
     
+    # Important: normalize=False to obtain raw activations
+    # Normalization will be applied explicitly later
+    print("Extracting activations...")
     X, masks = extractor.collect_activation_maps(
         data_loader,
-        normalize=True,
+        normalize=False,
         use_cache=True
     )
     
-    # Setup training
+    # 2. Apply robust Min-Max normalization
+    print("Applying Robust Min-Max Normalization...")
+    X = robust_min_max_normalize(X)
+    
+    # Setup training parameters
     INPUT_CHANNELS = model_config.num_channels
     HIDDEN_DIM = INPUT_CHANNELS * hidden_dim_multiplier
     TOP_K = int(HIDDEN_DIM * top_k_ratio)
     
-    # Create model
+    # Create ConvSAE model
     csae_model = MultiChannelConvSAE(
         in_channels=INPUT_CHANNELS,
         hidden_dim=HIDDEN_DIM,
@@ -169,11 +166,13 @@ def train_csae(
     ).to(device)
     
     optimizer = optim.Adam(csae_model.parameters(), lr=lr, weight_decay=weight_decay)
+    
+    # Loss functions
     lat_inhib_loss = LateralInhibitionLoss().to(device)
     compact_loss_fn = SpatialCompactnessLoss().to(device)
     channel_sparsity_loss_fn = FeatureChannelSparsityLoss().to(device)
     
-    # DataLoader
+    # Dataset preparation
     if mode == 'masked_loss':
         dataset = TensorDataset(X, masks)
     else:
@@ -181,14 +180,13 @@ def train_csae(
     
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     
-    # Logging
     logs = {
         "total_loss": [], "recon_loss": [], "l1_loss": [],
         "lateral_loss": [], "compact_loss": [], "channel_sparsity_loss": [],
         "active_pct": []
     }
     
-    print(f"\nStarting Training...")
+    print(f"\nStarting Training ({epochs} epochs)...")
     
     for epoch in range(epochs):
         epoch_metrics = {k: 0 for k in logs.keys()}
@@ -211,8 +209,13 @@ def train_csae(
             loss_compact = compact_loss_fn(sparse_features)
             loss_channel_sparsity = channel_sparsity_loss_fn(csae_model.encoder.weight)
             
-            loss = (loss_recon + lambda_l1 * loss_l1 + lambda_lat * loss_lateral +
-                   lambda_compact * loss_compact + lambda_channel_sparsity * loss_channel_sparsity)
+            loss = (
+                loss_recon +
+                lambda_l1 * loss_l1 +
+                lambda_lat * loss_lateral +
+                lambda_compact * loss_compact +
+                lambda_channel_sparsity * loss_channel_sparsity
+            )
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(csae_model.parameters(), max_norm=1.0)
@@ -228,13 +231,15 @@ def train_csae(
                 logs["compact_loss"].append(loss_compact.item())
                 logs["channel_sparsity_loss"].append(loss_channel_sparsity.item())
                 logs["active_pct"].append(active_pct)
-                for k in epoch_metrics.keys(): epoch_metrics[k] += logs[k][-1]
+                
+                for k in epoch_metrics.keys():
+                    epoch_metrics[k] += logs[k][-1]
                 n_batches += 1
         
         avg_metrics = {k: v / n_batches for k, v in epoch_metrics.items()}
         print(f"Epoch {epoch+1}/{epochs} | Loss: {avg_metrics['total_loss']:.4f} | Recon: {avg_metrics['recon_loss']:.4f}")
 
-    # --- CẬP NHẬT LOGIC LƯU FILE ---
+    # Save results
     weights_dir = Path("output/weights")
     info_dir = Path("output/training_info")
     weights_dir.mkdir(parents=True, exist_ok=True)
@@ -243,28 +248,30 @@ def train_csae(
     if output_prefix is None:
         output_prefix = f"{model_config.model_name}_{model_config.layer_path.replace('.', '_')}_csae_{mode}"
     
-    # 1. Lưu Model PKL
     model_save_path = weights_dir / f"{output_prefix}_model.pkl"
     joblib.dump(csae_model.cpu(), str(model_save_path))
     
-    # 2. Lưu Training Info
     training_info = {
         'config': {
-            'model': model_config.model_name, 'layer': model_config.layer_path,
-            'mode': mode, 'input_channels': INPUT_CHANNELS, 'hidden_dim': HIDDEN_DIM,
-            'top_k': TOP_K, 'epochs': epochs,
+            'model': model_config.model_name,
+            'layer': model_config.layer_path,
+            'mode': mode,
+            'input_channels': INPUT_CHANNELS,
+            'hidden_dim': HIDDEN_DIM,
+            'top_k': TOP_K,
+            'epochs': epochs,
         },
-        'logs': logs, 'final_metrics': avg_metrics
+        'logs': logs,
+        'final_metrics': avg_metrics
     }
+    
     info_save_path = info_dir / f"{output_prefix}_training_info.pkl"
     joblib.dump(training_info, str(info_save_path))
     
-    # 3. Lưu Logs PNG
     log_img_path = info_dir / f"{output_prefix}_logs.png"
     plot_training_logs(logs, str(log_img_path), model_config.model_name, model_config.layer_path)
     
-    print(f"\n✓ Saved outputs:\n  - Model: {model_save_path}\n  - Info:  {info_save_path}\n  - Logs:  {log_img_path}")
-
+    print(f"\n✓ Training complete. Model saved to: {model_save_path}")
 
 def main():
     parser = argparse.ArgumentParser(description='Train Multi-Channel ConvSAE')
@@ -275,27 +282,57 @@ def main():
     parser.add_argument('--epochs', type=int, default=15)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--list', action='store_true', help='List configs')
+    parser.add_argument('--list', action='store_true', help='List available configs')
     parser.add_argument('--output_prefix', type=str, default=None)
     
     args = parser.parse_args()
-    if args.list: print_available_configs(); return
-    if not args.model or not args.layer: print("Error: Specify --model and --layer"); return
+    if args.list:
+        print_available_configs()
+        return
+    if not args.model or not args.layer:
+        print("Error: Please specify --model and --layer")
+        return
     
     try:
         config = get_model_config(args.model, args.layer)
-    except ValueError as e: print(f"Error: {e}"); return
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
     
-    data_transform = transforms.Compose([
-        transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    full_dataset = datasets.ImageFolder(root=args.data_dir, transform=data_transform)
-    data_loader = DataLoader(full_dataset, batch_size=32, shuffle=False)
-    
-    train_csae(config, data_loader, device='cuda' if torch.cuda.is_available() else 'cpu',
-              mode=args.mode, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
-              output_prefix=args.output_prefix)
+    # Auto-detect dataset structure (train/val)
+    if os.path.exists(os.path.join(args.data_dir, 'train')):
+        args.data_dir = os.path.join(args.data_dir, 'train')
+        print(f"Auto-switching data_dir to: {args.data_dir}")
+
+    try:
+        data_transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            )
+        ])
+        full_dataset = datasets.ImageFolder(root=args.data_dir, transform=data_transform)
+        print(f"Loaded dataset: {len(full_dataset)} images")
+        
+        # Use smaller batch size for activation extraction to avoid OOM
+        data_loader = DataLoader(full_dataset, batch_size=32, shuffle=False)
+        
+        train_csae(
+            config,
+            data_loader,
+            device='cuda' if torch.cuda.is_available() else 'cpu',
+            mode=args.mode,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            output_prefix=args.output_prefix
+        )
+                   
+    except Exception as e:
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
