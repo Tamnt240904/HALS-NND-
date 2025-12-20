@@ -1,8 +1,8 @@
 """
-Script to check accuracy drop between the Original Model and the CSAE Reconstructed Model.
-Features:
-- Path Logic: .pkl in 'weights/original', .pth in 'weights/finetune'.
-- Modes: --mode [both, original, finetuned, smart] to control evaluation strategy.
+Script to check accuracy drop.
+Supports loading:
+1. Original Model: Assembled from backbone + CSAE (.pkl)
+2. Finetuned Model: Loaded fully from _finetuned_model.pkl
 """
 
 import torch
@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import pandas as pd
 import random
+from types import SimpleNamespace 
 
 sys.path.append('.')
 from config.model_configs import get_model_config, list_available_configs
@@ -43,8 +44,9 @@ IMAGENETTE_TO_IMAGENET = {
     'n03888257': 701, 'parachute': 701
 }
 
+# --- CLASS 1: Original Mode (Backbone + CSAE) ---
 class GenericModelWithCSAEReconstruction:
-    def __init__(self, model_config, csae_model, device='cuda', classifier_path=None):
+    def __init__(self, model_config, csae_model, device='cuda'):
         self.config = model_config
         self.device = device
         self.model = model_config.model_loader().to(device)
@@ -63,19 +65,6 @@ class GenericModelWithCSAEReconstruction:
         elif 'efficientnet' in self.config.model_name: self.model_type = 'sequential'
         elif 'alexnet' in self.config.model_name: self.model_type = 'sequential'
 
-        if classifier_path and os.path.exists(classifier_path):
-            print(f"   -> Loading classifier: {Path(classifier_path).name}")
-            state_dict = torch.load(classifier_path, map_location=device)
-            try:
-                if self.model_type == 'resnet':
-                    self.model.fc.load_state_dict(state_dict)
-                else:
-                    self.model.classifier.load_state_dict(state_dict)
-            except Exception as e:
-                print(f"Error loading classifier weights: {e}")
-        else:
-            print(f"   -> Using Original ImageNet Weights")
-
     def _save_activation(self, module, input, output): 
         self.activations = output
 
@@ -92,7 +81,6 @@ class GenericModelWithCSAEReconstruction:
         
         range_vals = max_vals - min_vals
         range_vals[range_vals < 1e-8] = 1.0 
-        
         min_vals_4d = min_vals.view(B, C, 1, 1)
         range_vals_4d = range_vals.view(B, C, 1, 1)
         
@@ -153,21 +141,47 @@ class GenericModelWithCSAEReconstruction:
         with torch.no_grad():
             features = self._forward_to_layer(x)
             original_acts = features.clone()
-            
             normalized_acts, min_vals, range_vals = self._normalize_activations(original_acts)
             
             reconstruction, sparse_features = self.csae(normalized_acts, use_topk=False)
             reconstructed_acts = reconstruction * range_vals + min_vals
-            
             logits = self._forward_from_layer(reconstructed_acts)
             
             mse = F.mse_loss(reconstructed_acts, original_acts).item()
             mse_norm = F.mse_loss(reconstruction, normalized_acts).item()
-            
             relative_error = ((reconstructed_acts - original_acts).abs().mean() / (original_acts.abs().mean() + 1e-8)).item()
             sparsity = (sparse_features > 0).float().mean().item()
             
             return logits, {'mse': mse, 'mse_norm': mse_norm, 'relative_error': relative_error, 'sparsity': sparsity}
+
+# --- CLASS 2: Finetuned Mode (Load from .pkl full) ---
+class TrainableHybridModel(nn.Module):
+    def __init__(self, model_config, csae_model, device='cuda'):
+        super().__init__()
+        self.config = model_config
+        self.device = device
+        self.model = None 
+        self.csae = None
+
+    def _save_activation(self, module, input, output):
+        self.activations = output
+
+    def _normalize_activations(self, acts):
+        return GenericModelWithCSAEReconstruction._normalize_activations(self, acts)
+
+    def _forward_to_layer(self, x):
+        return GenericModelWithCSAEReconstruction._forward_to_layer(self, x)
+
+    def _forward_from_layer(self, features):
+        return GenericModelWithCSAEReconstruction._forward_from_layer(self, features)
+
+    def forward_original(self, x):
+        # Chạy model gốc (classifier đã finetune)
+        with torch.no_grad(): return self.model(x)
+
+    def forward_with_reconstruction(self, x):
+        return GenericModelWithCSAEReconstruction.forward_with_reconstruction(self, x)
+
 
 def evaluate_accuracy_drop(model, data_loader, device='cuda', imagenette_to_imagenet=None):
     local_to_imagenet_map = {}
@@ -236,9 +250,9 @@ def print_results(results, model_name, layer_path, is_finetuned):
     print(f"  -> Drop: {results.get('acc_drop', 0):.2f}%")
     
     if 'efficientnet' in model_name or 'alexnet' in model_name:
-        print(f"  MSE: {results.get('avg_mse_norm', 0):.6f}")
+        print(f"  MSE (Norm): {results.get('avg_mse_norm', 0):.6f}")
     else:
-        print(f"  MSE: {results.get('avg_mse', 0):.6f}")
+        print(f"  MSE (Abs): {results.get('avg_mse', 0):.6f}")
 
 def find_trained_models(weights_dir="output/weights/original", filter_str=None):
     trained = []
@@ -257,16 +271,15 @@ def find_trained_models(weights_dir="output/weights/original", filter_str=None):
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate Accuracy Drop')
-    parser.add_argument('--all', action='store_true', help='Evaluate all models in output/weights')
+    parser.add_argument('--all', action='store_true', help='Evaluate all models')
     parser.add_argument('--filter', type=str, help='Filter models (e.g. resnet)')
     parser.add_argument('--model', type=str)
     parser.add_argument('--layer', type=str)
     parser.add_argument('--csae_model', type=str)
-    parser.add_argument('--load_classifier', type=str, help='Override classifier path')
     
     # --- MODE CONTROL ---
     parser.add_argument('--mode', type=str, default='both', choices=['both', 'original', 'finetuned', 'smart'],
-                        help="Eval mode: 'both' (default), 'original', 'finetuned', or 'smart' (prefer ft)")
+                        help="Eval mode: 'both', 'original', 'finetuned', or 'smart'")
     
     parser.add_argument('--data_dir', type=str, default='data/imagenette')
     parser.add_argument('--batch_size', type=int, default=32)
@@ -293,13 +306,14 @@ def main():
     except Exception as e:
         print(f"Error loading dataset: {e}"); return
 
+    # --- LIST BUILDER ---
     to_evaluate = []
     if args.all:
         to_evaluate = find_trained_models(filter_str=args.filter)
         print(f"Found {len(to_evaluate)} models to evaluate.")
     else:
         if not (args.model and args.layer and args.csae_model):
-            print("Error: Specify params or --all"); return
+            print("Error: Specify params OR --all"); return
         to_evaluate = [{'model': args.model, 'layer': args.layer, 'path': args.csae_model}]
 
     all_results = []
@@ -310,41 +324,46 @@ def main():
         try:
             m_cfg = get_model_config(cfg['model'], cfg['layer'])
             csae_pkl_path = cfg['path']
-            csae = joblib.load(csae_pkl_path)
+            
+            # --- Load Original CSAE if needed for 'original' mode ---
+            csae = None
+            if args.mode in ['both', 'original', 'smart']:
+                csae = joblib.load(csae_pkl_path)
             
             csae_path_obj = Path(csae_pkl_path)
-            finetune_filename = csae_path_obj.name.replace('_model.pkl', '_finetuned.pth')
+            finetune_filename = csae_path_obj.name.replace('_model.pkl', '_finetuned_model.pkl')
             expected_ft_path = csae_path_obj.parent.parent / 'finetuned' / finetune_filename
             has_finetune = expected_ft_path.exists()
             
             run_queue = []
             
             if args.mode == 'both':
-                run_queue.append((None, False)) # Original
-                if has_finetune:
-                    run_queue.append((str(expected_ft_path), True)) # Finetuned
-            
+                run_queue.append(('original', None))
+                if has_finetune: run_queue.append(('finetuned', str(expected_ft_path)))
             elif args.mode == 'original':
-                run_queue.append((None, False))
-                
+                run_queue.append(('original', None))
             elif args.mode == 'finetuned':
-                if has_finetune:
-                    run_queue.append((str(expected_ft_path), True))
-                else:
-                    print(f"   [Skip] No finetuned weights found for {cfg['model']} (Mode: finetuned)")
-            
+                if has_finetune: run_queue.append(('finetuned', str(expected_ft_path)))
+                else: print(f"   [Skip] No finetuned model found: {finetune_filename}")
             elif args.mode == 'smart':
-                if has_finetune:
-                    run_queue.append((str(expected_ft_path), True))
-                else:
-                    run_queue.append((None, False))
+                if has_finetune: run_queue.append(('finetuned', str(expected_ft_path)))
+                else: run_queue.append(('original', None))
 
-            if args.load_classifier and not args.all:
-                run_queue = [(args.load_classifier, True)]
-
-            for clf_path, is_ft in run_queue:
-                hybrid = GenericModelWithCSAEReconstruction(m_cfg, csae, device=device, classifier_path=clf_path)
+            for mode, path in run_queue:
+                hybrid = None
                 
+                if mode == 'original':
+                    # Backbone + CSAE
+                    hybrid = GenericModelWithCSAEReconstruction(m_cfg, csae, device=device)
+                else:
+                    # Load Full Model (.pkl)
+                    print(f"   -> Loading Full Finetuned Model: {Path(path).name}")
+                    hybrid = joblib.load(path).to(device)
+                    
+                    # Re-register hook 
+                    hybrid.target_layer = m_cfg.layer_getter(hybrid.model, hybrid.config.layer_path)
+                    hybrid.target_layer.register_forward_hook(hybrid._save_activation)
+
                 indices = torch.randperm(len(full_dataset))[:args.num_samples].tolist() if args.num_samples else None
                 ds = Subset(full_dataset, indices) if indices else full_dataset
                 loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False)
@@ -353,10 +372,10 @@ def main():
                 res.update({
                     'model': cfg['model'], 
                     'layer': cfg['layer'],
-                    'finetuned': is_ft
+                    'finetuned': (mode == 'finetuned')
                 })
                 all_results.append(res)
-                print_results(res, cfg['model'], cfg['layer'], is_ft)
+                print_results(res, cfg['model'], cfg['layer'], (mode == 'finetuned'))
 
         except Exception as e:
             # import traceback; traceback.print_exc()
@@ -365,7 +384,6 @@ def main():
     if args.all and all_results:
         df = pd.DataFrame(all_results).round(4)
         df = df.sort_values(by=['model', 'layer', 'finetuned'])
-        
         os.makedirs("output", exist_ok=True)
         df.to_csv(args.output_csv, index=False)
         print(f"\nBatch results saved to {args.output_csv}")
