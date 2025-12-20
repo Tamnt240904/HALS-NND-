@@ -240,8 +240,9 @@ def train_csae(
         print(f"Epoch {epoch+1}/{epochs} | Loss: {avg_metrics['total_loss']:.4f} | Recon: {avg_metrics['recon_loss']:.4f}")
 
     # Save results
-    weights_dir = Path("output/weights")
+    weights_dir = Path("output/weights/original") 
     info_dir = Path("output/training_info")
+    
     weights_dir.mkdir(parents=True, exist_ok=True)
     info_dir.mkdir(parents=True, exist_ok=True)
 
@@ -299,7 +300,6 @@ def main():
         print(f"Error: {e}")
         return
     
-    # Auto-detect dataset structure (train/val)
     if os.path.exists(os.path.join(args.data_dir, 'train')):
         args.data_dir = os.path.join(args.data_dir, 'train')
         print(f"Auto-switching data_dir to: {args.data_dir}")
@@ -330,7 +330,7 @@ def main():
             lr=args.lr,
             output_prefix=args.output_prefix
         )
-                   
+                    
     except Exception as e:
         print(f"Error: {e}")
 

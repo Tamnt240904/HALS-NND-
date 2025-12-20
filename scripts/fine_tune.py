@@ -1,5 +1,6 @@
 """
 Classifier Fine-tuning Script.
+Saves fine-tuned classifier weights to: output/weights/finetuned/
 """
 
 import torch
@@ -145,7 +146,7 @@ class TrainableHybridModel(nn.Module):
                 if not found_target:
                     if layer is self.target_layer:
                         found_target = True
-                    continue
+                    continue 
                 features = layer(features)
             
             if 'densenet' in self.config.model_name:
@@ -282,7 +283,8 @@ def main():
             
     print("Fine-tuning complete.")
     
-    weights_dir = Path("output/weights")
+    # --- Save to output/weights/finetuned ---
+    weights_dir = Path("output/weights/finetuned")
     weights_dir.mkdir(parents=True, exist_ok=True)
     
     csae_filename = Path(args.csae_model).stem
