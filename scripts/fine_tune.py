@@ -1,6 +1,6 @@
 """
 Classifier Fine-tuning Script.
-Saves the FULL fine-tuned hybrid model to: output/weights/finetuned/
+Saves fine-tuned classifier weights to: output/weights/finetuned/
 """
 
 import torch
@@ -15,7 +15,6 @@ import sys
 import os
 from tqdm import tqdm
 from pathlib import Path
-from types import SimpleNamespace  
 
 sys.path.append('.')
 from config.model_configs import get_model_config
@@ -42,9 +41,11 @@ class TrainableHybridModel(nn.Module):
         self.model = model_config.model_loader().to(device)
         self.csae = csae_model.to(device)
         
+        # Freeze backbone network
         for param in self.model.parameters():
             param.requires_grad = False
         
+        # Freeze CSAE
         for param in self.csae.parameters():
             param.requires_grad = False
             
@@ -82,51 +83,69 @@ class TrainableHybridModel(nn.Module):
     def _normalize_activations(self, acts):
         B, C, H, W = acts.shape
         flat = acts.view(B, C, -1)
-        
-        if 'efficientnet' in self.config.model_name:
-            min_vals = torch.quantile(flat, 0.01, dim=2, keepdim=True)
-            max_vals = torch.quantile(flat, 0.99, dim=2, keepdim=True)
-        else:
-            min_vals = flat.min(dim=2, keepdim=True)[0]
-            max_vals = flat.max(dim=2, keepdim=True)[0]
-            
+        min_vals = flat.min(dim=2, keepdim=True)[0]
+        max_vals = flat.max(dim=2, keepdim=True)[0]
         range_vals = max_vals - min_vals
         range_vals[range_vals < 1e-8] = 1.0
         min_vals_4d = min_vals.view(B, C, 1, 1)
         range_vals_4d = range_vals.view(B, C, 1, 1)
         
+        # Min-Max normalization to [0, 1]
         normalized = (acts - min_vals_4d) / range_vals_4d
         return torch.clamp(normalized, 0.0, 1.0), min_vals_4d, range_vals_4d
 
     def _forward_to_layer(self, x):
         if self.model_type == 'resnet':
-            x = self.model.conv1(x); x = self.model.bn1(x); x = self.model.relu(x); x = self.model.maxpool(x)
-            if 'layer1' in self.config.layer_path: return self.model.layer1(x)
+            x = self.model.conv1(x)
+            x = self.model.bn1(x)
+            x = self.model.relu(x)
+            x = self.model.maxpool(x)
+            
+            if 'layer1' in self.config.layer_path:
+                return self.model.layer1(x)
             x = self.model.layer1(x)
-            if 'layer2' in self.config.layer_path: return self.model.layer2(x)
+            
+            if 'layer2' in self.config.layer_path:
+                return self.model.layer2(x)
             x = self.model.layer2(x)
-            if 'layer3' in self.config.layer_path: return self.model.layer3(x)
+            
+            if 'layer3' in self.config.layer_path:
+                return self.model.layer3(x)
             x = self.model.layer3(x)
+            
             return self.model.layer4(x)
+
         elif hasattr(self.model, 'features'):
             for name, layer in self.model.features.named_children():
                 x = layer(x)
-                if layer is self.target_layer: return x
+                if layer is self.target_layer:
+                    return x
             return x
+
         return x
 
     def _forward_from_layer(self, features):
         if self.model_type == 'resnet':
-            if 'layer1' in self.config.layer_path: features = self.model.layer2(features); features = self.model.layer3(features); features = self.model.layer4(features)
-            elif 'layer2' in self.config.layer_path: features = self.model.layer3(features); features = self.model.layer4(features)
-            elif 'layer3' in self.config.layer_path: features = self.model.layer4(features)
-            features = self.model.avgpool(features); features = torch.flatten(features, 1)
+            if 'layer1' in self.config.layer_path:
+                features = self.model.layer2(features)
+                features = self.model.layer3(features)
+                features = self.model.layer4(features)
+            elif 'layer2' in self.config.layer_path:
+                features = self.model.layer3(features)
+                features = self.model.layer4(features)
+            elif 'layer3' in self.config.layer_path:
+                features = self.model.layer4(features)
+
+            features = self.model.avgpool(features)
+            features = torch.flatten(features, 1)
             return self.model.fc(features)
+
         elif hasattr(self.model, 'features'):
             found_target = False
             for name, layer in self.model.features.named_children():
                 if not found_target:
-                    if layer is self.target_layer: found_target = True
+                    if layer is self.target_layer:
+                        found_target = True
                     continue 
                 features = layer(features)
             
@@ -135,21 +154,32 @@ class TrainableHybridModel(nn.Module):
                 features = F.adaptive_avg_pool2d(features, (1, 1))
                 features = torch.flatten(features, 1)
                 return self.model.classifier(features)
+
             elif 'efficientnet' in self.config.model_name:
                 features = self.model.avgpool(features)
                 features = torch.flatten(features, 1)
                 return self.model.classifier(features)
+
             elif self.model_type in ['sequential', 'alexnet']:
                 features = self.model.avgpool(features)
                 features = torch.flatten(features, 1)
                 return self.model.classifier(features)
+
         return features
 
     def forward(self, x):
         features = self._forward_to_layer(x)
+        
+        # Normalize activations before CSAE
         normalized_acts, min_vals, range_vals = self._normalize_activations(features)
+        
+        # Reconstruct activations using CSAE
         reconstruction, _ = self.csae(normalized_acts, use_topk=True)
+        
+        # De-normalize reconstructed activations
         reconstructed_acts = reconstruction * range_vals + min_vals
+        
+        # Forward reconstructed features to classifier
         logits = self._forward_from_layer(reconstructed_acts)
         return logits
 
@@ -171,8 +201,13 @@ def main():
     
     print(f"Loading data from: {args.data_dir}")
     data_transform = transforms.Compose([
-        transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
     ])
     dataset = datasets.ImageFolder(root=args.data_dir, transform=data_transform)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
@@ -184,6 +219,7 @@ def main():
             local_to_imagenet_map[idx] = IMAGENETTE_TO_IMAGENET[name]
         else:
             local_to_imagenet_map[idx] = -1
+    print(f"Mapped {len(local_to_imagenet_map)} classes to ImageNet indices.")
 
     try:
         config = get_model_config(args.model, args.layer)
@@ -222,13 +258,15 @@ def main():
                     mapped_labels.append(mapped)
                     valid_indices.append(i)
             
-            if not valid_indices: continue
+            if not valid_indices:
+                continue
             
             images = images[valid_indices]
             target_labels = torch.tensor(mapped_labels, device=device)
 
             optimizer.zero_grad()
             outputs = hybrid_model(images)
+            
             loss = criterion(outputs, target_labels)
             loss.backward()
             optimizer.step()
@@ -238,31 +276,28 @@ def main():
             total += target_labels.size(0)
             correct += predicted.eq(target_labels).sum().item()
             
-            pbar.set_postfix({'Loss': running_loss / total, 'Acc': 100. * correct / total})
+            pbar.set_postfix({
+                'Loss': running_loss / total,
+                'Acc': 100. * correct / total
+            })
             
     print("Fine-tuning complete.")
     
+    # --- Save to output/weights/finetuned ---
     weights_dir = Path("output/weights/finetuned")
     weights_dir.mkdir(parents=True, exist_ok=True)
     
     csae_filename = Path(args.csae_model).stem
     base_name = csae_filename.replace('_model', '')
     
-    save_path = weights_dir / f"{base_name}_finetuned_model.pkl"
+    save_path = weights_dir / f"{base_name}_finetuned.pth"
     
-    hybrid_model.cpu()
-    hybrid_model.config = SimpleNamespace(
-        model_name=config.model_name, 
-        layer_path=config.layer_path
-    )
+    if hasattr(hybrid_model.model, 'classifier'):
+        torch.save(hybrid_model.model.classifier.state_dict(), str(save_path))
+    elif hasattr(hybrid_model.model, 'fc'):
+        torch.save(hybrid_model.model.fc.state_dict(), str(save_path))
     
-    print(f"Saving FULL hybrid model to: {save_path}...")
-    try:
-        joblib.dump(hybrid_model, str(save_path))
-        print(f"✓ Model saved successfully!")
-    except Exception as e:
-        print(f"Failed to save model: {e}")
-        import traceback; traceback.print_exc()
+    print(f"Classifier weights saved to: {save_path}")
 
 if __name__ == "__main__":
     main()
