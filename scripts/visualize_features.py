@@ -2,16 +2,24 @@
 Generic Multi-Channel ConvSAE Feature Visualization
 
 Supports any trained CSAE model (any backbone, any layer).
+Now supports finetuned classifiers and batch processing.
 
 Usage:
     # Visualize single image
     python scripts/visualize_features.py --model vgg16 --layer features.16 --csae_model vgg16_features_16_csae_masked_loss_model.pkl --image_path data/imagenette/tench/n01440764_1.JPEG
     
+    # Visualize with finetuned classifier
+    python scripts/visualize_features.py --model resnet50 --layer layer3 --csae_model resnet50_layer3_csae_masked_loss_model.pkl --image_path data/imagenette/tench/n01440764_1.JPEG --mode finetuned
+    
+    # Visualize all models
+    python scripts/visualize_features.py --all --num_images 5
+    
     # Visualize multiple images from class
     python scripts/visualize_features.py --model resnet50 --layer layer3 --csae_model resnet50_layer3_csae_masked_loss_model.pkl --class_name golf_ball --num_images 10
-    
-    # Visualize all classes
-    python scripts/visualize_features.py --model resnet50 --layer layer3 --csae_model resnet50_layer3_csae_masked_loss_model.pkl --num_images 10
+
+    # Visualize all classes and model 
+    python scripts/visualize_features.py --all --num_images 10 --mode finetuned
+
 """
 
 import torch
@@ -29,7 +37,7 @@ import sys
 import random
 
 sys.path.append('.')
-from config.model_configs import get_model_config
+from config.model_configs import get_model_config, list_available_configs
 from src.gradcam_fixed import GradCAM
 
 
@@ -46,7 +54,8 @@ class GenericCSAEVisualizer:
         model_config,
         csae_model_path: str,
         device='cuda',
-        cumulative_threshold=0.85
+        cumulative_threshold=0.85,
+        classifier_path=None
     ):
         """
         Args:
@@ -54,6 +63,7 @@ class GenericCSAEVisualizer:
             csae_model_path: Path to trained CSAE model
             device: Device to use
             cumulative_threshold: GradCAM threshold for visualization
+            classifier_path: Path to finetuned classifier weights (optional)
         """
         self.config = model_config
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
@@ -69,6 +79,34 @@ class GenericCSAEVisualizer:
         print(f"Loading {model_config.model_name} backbone...")
         self.model = model_config.model_loader().to(self.device)
         self.model.eval()
+        
+        # Determine model type
+        self.model_type = 'unknown'
+        if 'vgg' in self.config.model_name:
+            self.model_type = 'sequential'
+        elif 'resnet' in self.config.model_name:
+            self.model_type = 'resnet'
+        elif 'densenet' in self.config.model_name:
+            self.model_type = 'sequential'
+        elif 'efficientnet' in self.config.model_name:
+            self.model_type = 'sequential'
+        elif 'alexnet' in self.config.model_name:
+            self.model_type = 'sequential'
+        
+        # Load finetuned classifier if provided
+        if classifier_path and Path(classifier_path).exists():
+            print(f"   -> Loading finetuned classifier: {Path(classifier_path).name}")
+            try:
+                classifier = torch.load(classifier_path, map_location=self.device)
+                if self.model_type == 'resnet':
+                    self.model.fc = classifier
+                else:
+                    self.model.classifier = classifier
+                print(f"   ✓ Finetuned classifier loaded")
+            except Exception as e:
+                print(f"   ⚠ Error loading classifier: {e}, using original weights")
+        else:
+            print(f"   -> Using Original ImageNet Weights")
         
         # Get target layer
         self.target_layer = model_config.layer_getter(self.model, model_config.layer_path)
@@ -182,7 +220,7 @@ class GenericCSAEVisualizer:
             'top_features': top_features
         }
     
-    def visualize_features(self, image_path: str, top_k: int = 16, save_path: str = None):
+    def visualize_features(self, image_path: str, top_k: int = 16, save_path: str = None, is_finetuned: bool = False):
         """Visualize top-k CSAE features."""
         print(f"Processing: {image_path}")
         
@@ -193,7 +231,8 @@ class GenericCSAEVisualizer:
             results['top_features'],
             results['num_selected_channels'],
             results['channel_weights'],
-            save_path
+            save_path,
+            is_finetuned
         )
         
         print(f"✓ Visualization complete!")
@@ -206,7 +245,8 @@ class GenericCSAEVisualizer:
         top_features: List[Tuple],
         num_selected_channels: int,
         channel_weights: torch.Tensor,
-        save_path: str = None
+        save_path: str = None,
+        is_finetuned: bool = False
     ):
         """Plot grid of features."""
         n_features = len(top_features)
@@ -229,7 +269,8 @@ class GenericCSAEVisualizer:
         top_5_indices = torch.argsort(channel_weights, descending=True)[:5].tolist()
         top_5_scores = [channel_weights[i].item() for i in top_5_indices]
         
-        info_text = f"Model: {self.config.model_name}\n"
+        ft_status = "[Finetuned]" if is_finetuned else "[Original]"
+        info_text = f"Model: {self.config.model_name} {ft_status}\n"
         info_text += f"Layer: {self.config.layer_path}\n"
         info_text += f"Channels: {self.config.num_channels}\n\n"
         info_text += f"GradCAM Reference:\n"
@@ -270,7 +311,7 @@ class GenericCSAEVisualizer:
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             cbar.ax.tick_params(labelsize=7)
         
-        title = f'Multi-Channel ConvSAE Features: {self.config.model_name}.{self.config.layer_path}\n'
+        title = f'Multi-Channel ConvSAE Features: {self.config.model_name}.{self.config.layer_path} {ft_status}\n'
         title += f'Top-{n_features} Activated Features ({self.config.spatial_size[0]}×{self.config.spatial_size[1]})'
         plt.suptitle(title, fontsize=13, fontweight='bold', y=0.998)
         
@@ -281,20 +322,45 @@ class GenericCSAEVisualizer:
             plt.show()
 
 
+def find_trained_models(weights_dir="output/weights/original", filter_str=None):
+    """Find all trained models in weights directory."""
+    trained = []
+    available = list_available_configs()
+    weights_path = Path(weights_dir)
+    if not weights_path.exists():
+        return []
+    
+    for pkl in weights_path.glob("*_model.pkl"):
+        if filter_str and filter_str not in pkl.name:
+            continue
+        for m_name in available.keys():
+            if pkl.name.startswith(m_name):
+                for l_path in available[m_name]:
+                    if l_path.replace('.', '_') in pkl.name:
+                        trained.append({
+                            'model': m_name,
+                            'layer': l_path,
+                            'path': str(pkl)
+                        })
+    return trained
+
+
 def main():
     parser = argparse.ArgumentParser(description='Visualize CSAE Features')
-    parser.add_argument('--model', type=str, required=True,
-                       help='Model name (e.g., vgg16, resnet50)')
-    parser.add_argument('--layer', type=str, required=True,
-                       help='Layer path (e.g., features.16, layer3)')
-    parser.add_argument('--csae_model', type=str, required=True,
-                       help='Path to trained CSAE model')
-    parser.add_argument('--image_path', type=str,
-                       help='Path to single image')
-    parser.add_argument('--class_name', type=str,
-                       help='Class name for multiple images')
+    parser.add_argument('--all', action='store_true', help='Visualize all models in output/weights')
+    parser.add_argument('--filter', type=str, help='Filter models (e.g. resnet)')
+    parser.add_argument('--model', type=str, help='Model name (e.g., vgg16, resnet50)')
+    parser.add_argument('--layer', type=str, help='Layer path (e.g., features.16, layer3)')
+    parser.add_argument('--csae_model', type=str, help='Path to trained CSAE model')
+    
+    # Mode control
+    parser.add_argument('--mode', type=str, default='both', choices=['both', 'original', 'finetuned', 'smart'],
+                       help="Visualization mode: 'both' (default), 'original', 'finetuned', or 'smart' (prefer ft)")
+    
+    parser.add_argument('--image_path', type=str, help='Path to single image')
+    parser.add_argument('--class_name', type=str, help='Class name for multiple images')
     parser.add_argument('--num_images', type=int, default=1,
-                       help='Number of images per class (if using --class_name or processing all classes)')
+                       help='Number of images per class')
     parser.add_argument('--data_dir', type=str, default='data/imagenette',
                        help='Dataset directory')
     parser.add_argument('--top_k_features', type=int, default=16,
@@ -304,110 +370,144 @@ def main():
     
     args = parser.parse_args()
     
-    # Get config
-    try:
-        config = get_model_config(args.model, args.layer)
-    except ValueError as e:
-        print(f"Error: {e}")
-        return
-    
-    # Setup visualizer
-    print("="*80)
-    print(f"Multi-Channel ConvSAE Feature Visualization ({args.model})")
-    print("="*80 + "\n")
-    
-    visualizer = GenericCSAEVisualizer(
-        config,
-        args.csae_model,
-        device='cuda' if torch.cuda.is_available() else 'cpu'
-    )
-    
-    # --- Prepare list of images to process: (image_path_str, class_name_for_output) ---
-    images_to_process: List[Tuple[str, str]] = []
-    classes_to_run: List[str] = []
-    
-    data_path = Path(args.data_dir)
-    if not data_path.exists():
-        print(f"Error: Data directory not found: {data_path}")
-        return
-    
-    # Case 1: Single image path is provided
-    if args.image_path:
-        img_path = Path(args.image_path)
-        # Determine class name for output folder (parent directory name, or default)
-        parent_name = img_path.parent.name
-        class_name_for_output = parent_name if parent_name and parent_name != Path(args.data_dir).name else "single_image_run"
-        images_to_process.append((str(img_path), class_name_for_output))
-    
-    # Case 2 & 3: Specific class or ALL classes
+    # Build list of models to process
+    to_visualize = []
+    if args.all:
+        to_visualize = find_trained_models(filter_str=args.filter)
+        print(f"Found {len(to_visualize)} models to visualize.")
     else:
-        if args.class_name:
-            # Case 2: Specific class provided
-            classes_to_run = [args.class_name]
-            print(f"Processing specific class: {args.class_name}")
-        else:
-            # Case 3: Process ALL classes
-            classes_to_run = [d.name for d in data_path.iterdir() if d.is_dir()]
-            print(f"No specific class/image provided. Processing all {len(classes_to_run)} classes.")
-        
-        # Iterate over selected classes to sample images (args.num_images per class)
-        for class_name in classes_to_run:
-            class_dir = data_path / class_name
-            if not class_dir.exists():
-                print(f"Error: Class directory not found: {class_dir}. Skipping.")
-                continue
-            
-            # Find all images in this class
-            all_images = [p for p in class_dir.iterdir() 
-                         if p.is_file() and p.suffix.lower() in ('.jpeg', '.jpg', '.png')]
-            
-            if len(all_images) == 0:
-                print(f"Warning: No images found in class '{class_name}'. Skipping.")
-                continue
-            
-            # Sample exactly args.num_images (or all if fewer exist)
-            num_to_sample = min(args.num_images, len(all_images))
-            rng = random.Random(RANDOM_SEED)
-            sampled_images = rng.sample(all_images, num_to_sample)
-            
-            # Add to processing list
-            for img_path in sampled_images:
-                images_to_process.append((str(img_path), class_name))
-            
-            print(f"  > Class '{class_name}': Sampled {num_to_sample}/{len(all_images)} images.")
+        if not (args.model and args.layer and args.csae_model):
+            print("Error: Specify --model, --layer, --csae_model or use --all")
+            return
+        to_visualize = [{
+            'model': args.model,
+            'layer': args.layer,
+            'path': args.csae_model
+        }]
     
-    if not images_to_process:
-        print("Error: No images found to process. Check data directory or class names/image paths.")
+    if not to_visualize:
+        print("No models to visualize.")
         return
     
-    print(f"\nTotal images to process: {len(images_to_process)} from {len(set([c for _, c in images_to_process]))} class(es)\n")
-    
-    # --- Main Processing and Visualization Loop ---
-    for i, (img_path_str, class_name) in enumerate(images_to_process):
-        img_path = Path(img_path_str)
+    # Process each model
+    for cfg in to_visualize:
+        print("\n" + "="*80)
+        print(f"Model: {cfg['model']}.{cfg['layer']}")
+        print("="*80 + "\n")
         
-        # 1. Define output directory: args.output_dir / class_name
-        output_dir_path = Path(args.output_dir) / args.model / class_name
-        output_dir_path.mkdir(parents=True, exist_ok=True)
+        try:
+            config = get_model_config(cfg['model'], cfg['layer'])
+        except ValueError as e:
+            print(f"Error loading config: {e}")
+            continue
         
-        # 2. Process and visualize
-        print(f"\n{'='*80}")
-        print(f"Image {i+1}/{len(images_to_process)} | Class: {class_name} | File: {img_path.name}")
-        print(f"Saving visualization to: {output_dir_path}")
-        print(f"{'='*80}\n")
+        # Determine classifier path
+        csae_path_obj = Path(cfg['path'])
+        finetune_filename = csae_path_obj.name.replace('_model.pkl', '_finetuned.pth')
+        expected_ft_path = csae_path_obj.parent.parent / 'finetuned' / finetune_filename
+        has_finetune = expected_ft_path.exists()
         
-        img_name = img_path.stem
-        save_path = output_dir_path / f"{img_name}_{args.model}_{args.layer.replace('.', '_')}_features.png"
+        # Determine run queue based on mode
+        run_queue = []
         
-        visualizer.visualize_features(
-            str(img_path),
-            top_k=args.top_k_features,
-            save_path=str(save_path)
-        )
+        if args.mode == 'both':
+            run_queue.append((None, False))  # Original
+            if has_finetune:
+                run_queue.append((str(expected_ft_path), True))  # Finetuned
+        elif args.mode == 'original':
+            run_queue.append((None, False))
+        elif args.mode == 'finetuned':
+            if has_finetune:
+                run_queue.append((str(expected_ft_path), True))
+            else:
+                print(f"   [Skip] No finetuned weights found (Mode: finetuned)")
+                continue
+        elif args.mode == 'smart':
+            if has_finetune:
+                run_queue.append((str(expected_ft_path), True))
+            else:
+                run_queue.append((None, False))
+        
+        # Prepare images to process
+        data_path = Path(args.data_dir)
+        if not data_path.exists():
+            print(f"Error: Data directory not found: {data_path}")
+            continue
+        
+        images_to_process: List[Tuple[str, str]] = []
+        
+        # Case 1: Single image
+        if args.image_path:
+            img_path = Path(args.image_path)
+            parent_name = img_path.parent.name
+            class_name_for_output = parent_name if parent_name and parent_name != data_path.name else "single_image_run"
+            images_to_process.append((str(img_path), class_name_for_output))
+        
+        # Case 2 & 3: Class-based or all classes
+        else:
+            if args.class_name:
+                classes_to_run = [args.class_name]
+            else:
+                classes_to_run = [d.name for d in data_path.iterdir() if d.is_dir()]
+            
+            for class_name in classes_to_run:
+                class_dir = data_path / class_name
+                if not class_dir.exists():
+                    continue
+                
+                all_images = [p for p in class_dir.iterdir() 
+                            if p.is_file() and p.suffix.lower() in ('.jpeg', '.jpg', '.png')]
+                
+                if not all_images:
+                    continue
+                
+                num_to_sample = min(args.num_images, len(all_images))
+                rng = random.Random(RANDOM_SEED)
+                sampled_images = rng.sample(all_images, num_to_sample)
+                
+                for img_path in sampled_images:
+                    images_to_process.append((str(img_path), class_name))
+        
+        if not images_to_process:
+            print("No images found to process.")
+            continue
+        
+        # Process each classifier variant (original/finetuned)
+        for clf_path, is_ft in run_queue:
+            ft_label = "finetuned" if is_ft else "original"
+            print(f"\n--- Processing with {ft_label} classifier ---")
+            
+            # Setup visualizer
+            visualizer = GenericCSAEVisualizer(
+                config,
+                cfg['path'],
+                device='cuda' if torch.cuda.is_available() else 'cpu',
+                classifier_path=clf_path
+            )
+            
+            # Process each image
+            for i, (img_path_str, class_name) in enumerate(images_to_process):
+                img_path = Path(img_path_str)
+                
+                # Output directory structure: output_dir/model_name/ft_label/class_name/
+                output_dir_path = Path(args.output_dir) / cfg['model'] / ft_label / class_name
+                output_dir_path.mkdir(parents=True, exist_ok=True)
+                
+                print(f"\nImage {i+1}/{len(images_to_process)} | Class: {class_name} | File: {img_path.name}")
+                
+                img_name = img_path.stem
+                save_path = output_dir_path / f"{img_name}_{cfg['model']}_{cfg['layer'].replace('.', '_')}_features.png"
+                
+                visualizer.visualize_features(
+                    str(img_path),
+                    top_k=args.top_k_features,
+                    save_path=str(save_path),
+                    is_finetuned=is_ft
+                )
     
     print(f"\n{'='*80}")
     print(f"✓ All visualizations complete!")
-    print(f"  Output directory base: {Path(args.output_dir)}")
+    print(f"  Output directory: {Path(args.output_dir)}")
     print(f"{'='*80}")
 
 
